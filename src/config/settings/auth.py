@@ -14,6 +14,7 @@
 from datetime import timedelta
 
 from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured
 
 from src.config.env import env
 from src.config.settings.drf import DRF_BROWSABLE_ENABLED
@@ -72,8 +73,16 @@ IS_DEVELOPMENT = is_development()
 
 # Ограничение срока жизни JWT (true/false, не зависит от API_DEPLOY_TYPE).
 # true  — используются API_ACCESS_TOKEN_LIFETIME и API_REFRESH_TOKEN_LIFETIME
-# false — срок жизни не ограничивается (значения lifetime игнорируются)
+# false — срок жизни не ограничивается (значения lifetime игнорируются);
+#         только для development / open-профиля — в production запрещено.
 JWT_LIFETIME_ENABLED = env.bool('API_JWT_LIFETIME_ENABLED', default=True)
+
+if not JWT_LIFETIME_ENABLED and not IS_DEVELOPMENT:
+    raise ImproperlyConfigured(
+        'API_JWT_LIFETIME_ENABLED=false запрещён при ERGO_ENV=production '
+        '(и при любом не-development режиме). Включите ограничение срока жизни JWT '
+        'или переключите окружение на development.'
+    )
 
 # Внутреннее значение при JWT_LIFETIME_ENABLED=false (JWT требует claim exp)
 JWT_NO_EXPIRY_LIFETIME_MINUTES = 5256000
@@ -86,7 +95,7 @@ SIMPLE_JWT = {
     'REFRESH_TOKEN_LIFETIME': timedelta(
         minutes=REFRESH_TOKEN_LIFETIME if JWT_LIFETIME_ENABLED else JWT_NO_EXPIRY_LIFETIME_MINUTES,
     ),
-    'ROTATE_REFRESH_TOKENS': False,
+    'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
     'ALGORITHM': 'HS256',
     'SIGNING_KEY': env.str('API_JWT_SIGNING_KEY', default='') or env.str('API_SECRET_KEY'),
@@ -103,7 +112,7 @@ def get_token_lifetime(remember_me: bool = False) -> tuple:
     """
     Возвращает время жизни access и refresh токенов.
 
-    При API_JWT_LIFETIME_ENABLED=false срок не ограничивается.
+    При API_JWT_LIFETIME_ENABLED=false (только development) срок не ограничивается.
     При true — стандартные значения или remember_me.
 
     Returns:

@@ -14,8 +14,12 @@ from src.core.cms.adp.auth_cookies import (
     refresh_cookie_max_age,
     set_refresh_cookie,
 )
+from src.core.cms.adp.models import UserDevice
 from src.core.cms.adp.services.session_bootstrap import build_session_bootstrap_payload
-from src.core.cms.adp.services.session_devices import is_device_session_active
+from src.core.cms.adp.services.session_devices import (
+    bind_device_to_refresh_token,
+    is_device_session_active,
+)
 from src.config.settings.auth import REFRESH_TOKEN_LIFETIME
 
 logger = logging.getLogger('core.cms.adp.token_refresh')
@@ -50,10 +54,30 @@ class DeviceBoundTokenRefreshSerializer(TokenRefreshSerializer):
         except get_user_model().DoesNotExist:
             raise ValidationError(_('Сессия завершена. Войдите снова.')) from None
 
-        access = refresh.access_token
+        # После ротации SimpleJWT кладёт новый refresh в data; jti устройства
+        # нужно перепривязать, иначе revoke по UserDevice бьёт в старый токен.
+        active_refresh = refresh
+        rotated_value = data.get('refresh')
+        if rotated_value:
+            active_refresh = RefreshToken(rotated_value)
+            try:
+                device_pk = int(device_id)
+            except (TypeError, ValueError):
+                device_pk = None
+            if device_pk is not None and user_id is not None:
+                device = UserDevice.objects.filter(
+                    pk=device_pk,
+                    user_id=user_id,
+                    is_active=True,
+                ).first()
+                if device is not None:
+                    bind_device_to_refresh_token(device, active_refresh)
+
+        access = active_refresh.access_token
         access['device_id'] = device_id
         data['access'] = str(access)
         return data
+
 
 class DeviceBoundTokenRefreshView(TokenRefreshView):
     serializer_class = DeviceBoundTokenRefreshSerializer

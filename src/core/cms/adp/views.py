@@ -11,6 +11,7 @@ from src.core.cms.adp.auth_cookies import (
     get_refresh_token_from_request,
     set_prev_user_cookie,
 )
+from src.core.cms.adp.services.session_devices import revoke_logout_session
 from src.core.audit.shortcuts import audit_log
 
 
@@ -51,7 +52,7 @@ def _prev_user_id_from_logout_request(request):
 
 
 class LogoutView(BaseAPIView):
-    """Очистка HttpOnly refresh-cookie (доступно без валидного access)."""
+    """Отзыв refresh-сессии и очистка HttpOnly cookie (доступно без валидного access)."""
 
     # Идемпотентная очистка cookie: не режем throttle'ом — иначе шторм 401→logout
     # получает 429 и refresh-cookie так и не сбрасывается.
@@ -63,6 +64,8 @@ class LogoutView(BaseAPIView):
     def post(self, request):
         response = Response(status=status.HTTP_204_NO_CONTENT)
         prev_user_id = _prev_user_id_from_logout_request(request)
+        # Best-effort: blacklist / revoke устройства до очистки cookie.
+        revoke_logout_session(request)
         if prev_user_id is not None:
             set_prev_user_cookie(response, prev_user_id)
         clear_auth_cookies(response)

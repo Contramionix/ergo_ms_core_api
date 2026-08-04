@@ -81,6 +81,83 @@ def revoke_user_device_session(device: UserDevice) -> None:
     device.delete()
 
 
+def _payload_from_refresh_string(raw: str | None) -> dict | None:
+    """Claims refresh-токена; для истёкшего — decode без проверки exp."""
+    if not raw:
+        return None
+    from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
+    from rest_framework_simplejwt.tokens import RefreshToken
+
+    try:
+        return RefreshToken(raw).payload
+    except (TokenError, InvalidToken):
+        pass
+    try:
+        backend = RefreshToken.get_token_backend()
+        return backend.decode(raw, verify=False)
+    except Exception:
+        return None
+
+
+def revoke_logout_session(request) -> None:
+    """
+    Отзывает текущую сессию при logout (best-effort, идемпотентно).
+
+    Предпочитает revoke_user_device_session по device_id из access или refresh;
+    иначе blacklist jti refresh-cookie. Ошибки глотаются — logout всегда 204.
+    """
+    from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
+    from rest_framework_simplejwt.settings import api_settings
+    from rest_framework_simplejwt.tokens import RefreshToken
+
+    from src.core.cms.adp.auth_cookies import get_refresh_token_from_request
+
+    raw = get_refresh_token_from_request(request)
+    payload = _payload_from_refresh_string(raw)
+
+    device_id = get_request_device_id(request)
+    jti = None
+    user = None
+
+    if payload:
+        jti = payload.get('jti')
+        if device_id is None and payload.get('device_id') is not None:
+            try:
+                device_id = int(payload['device_id'])
+            except (TypeError, ValueError):
+                device_id = None
+        user_id = payload.get(api_settings.USER_ID_CLAIM)
+        if user_id is not None:
+            user = User.objects.filter(pk=user_id).first()
+
+    if user is None:
+        request_user = getattr(request, 'user', None)
+        if request_user is not None and getattr(request_user, 'is_authenticated', False):
+            user = request_user
+
+    try:
+        if user is not None and device_id is not None:
+            device = UserDevice.objects.filter(pk=device_id, user=user).first()
+            if device is not None:
+                outstanding_jti = device.outstanding_token_jti
+                revoke_user_device_session(device)
+                if jti and jti != outstanding_jti:
+                    blacklist_refresh_jti(user, jti)
+                return
+
+        if user is not None and jti:
+            blacklist_refresh_jti(user, jti)
+            return
+
+        if raw:
+            try:
+                RefreshToken(raw).blacklist()
+            except (AttributeError, TokenError, InvalidToken):
+                pass
+    except Exception:
+        pass
+
+
 def is_device_session_active(user: User, device_id) -> bool:
     if device_id is None:
         return True
