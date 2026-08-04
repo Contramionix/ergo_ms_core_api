@@ -8,7 +8,6 @@ from django.contrib.auth.models import update_last_login
 from django.utils.translation import gettext as _
 
 User = get_user_model()
-from django.utils.crypto import get_random_string
 from drf_yasg import openapi
 from drf_yasg.utils import swagger_auto_schema
 from rest_framework import status
@@ -23,7 +22,7 @@ from src.core.cms.adp.auth_cookies import (
     refresh_cookie_max_age,
     set_refresh_cookie,
 )
-from src.core.cms.adp.models import EmailConfirmationCode, UserDevice, UserProfile
+from src.core.cms.adp.models import UserDevice, UserProfile
 from src.core.cms.adp.password_policy import validate_new_password_pair
 from src.core.cms.adp.serializers import (
     UserLoginSerializer,
@@ -37,6 +36,7 @@ from src.core.cms.adp.services.session_devices import (
     attach_device_to_refresh_token,
     bind_device_to_refresh_token,
 )
+from src.core.cms.adp.services.user_deletion import revoke_user_auth
 from src.core.cms.adp.session_context_tokens import ScopedSessionRefreshToken
 from src.core.integrations import bridge
 from src.core.integrations.module_contracts import SESSION_RESTORE_CLAIMS
@@ -130,9 +130,15 @@ class SendConfirmationCodeView(BaseAPIView):
     )   
     def post(self, request):
         purpose = request.data.get('purpose', '')
-        if PasswordResetService.is_password_reset_purpose(purpose) and not PasswordResetService.is_enabled():
+        is_password_reset = PasswordResetService.is_password_reset_purpose(purpose)
+        if is_password_reset and not PasswordResetService.is_enabled():
             return Response(
                 {'error': PasswordResetService.get_disabled_message()},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if is_password_reset and not PasswordResetService.is_email_delivery_ready():
+            return Response(
+                {'error': PasswordResetService.get_unavailable_message()},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
@@ -147,18 +153,9 @@ class SendConfirmationCodeView(BaseAPIView):
                 status=status.HTTP_200_OK,
             )
 
-        # Генерация 6-значного кода
-        code = get_random_string(length=6, allowed_chars='0123456789')
-        
-        # Обновляем или создаём запись для email
-        EmailConfirmationCode.objects.update_or_create(
-            email=email,
-            defaults={"code": code},
-        )
-        
-        # Отправляем email
+        code = PasswordResetService.issue_code(email)
         success, error_message = send_confirmation_email(email, code)
-        
+
         if not success:
             return Response(
                 {
@@ -175,6 +172,9 @@ class SendConfirmationCodeView(BaseAPIView):
         )
 
 class VerifyConfirmationCodeView(BaseAPIView):
+    throttle_classes = [AnonRateThrottle, ScopedRateThrottle]
+    throttle_scope = 'password_reset'
+
     @swagger_auto_schema(
         operation_description="Проверка кода подтверждения.",
     )
@@ -182,22 +182,14 @@ class VerifyConfirmationCodeView(BaseAPIView):
         email = request.data.get("email")
         code = request.data.get("code")
 
-
         if not email or not code:
             return Response({"error": _("Email и код обязательны")}, status=status.HTTP_400_BAD_REQUEST)
 
-        try:
-            confirmation_code = EmailConfirmationCode.objects.get(email=email)
-        except EmailConfirmationCode.DoesNotExist:
-            return Response({"error": _("Неверный Email или код")}, status=status.HTTP_400_BAD_REQUEST)
+        ok, error_message = PasswordResetService.verify_code(email, code, consume=False)
+        if not ok:
+            return Response({"error": error_message}, status=status.HTTP_400_BAD_REQUEST)
 
-        if confirmation_code.code == code:
-            # Код верен, можно выполнить дальнейшие действия
-            # Удаляем запись после успешной проверки
-            confirmation_code.delete()
-            return Response({"message": _("Код успешно подтвержден")}, status=status.HTTP_200_OK)
-        else:
-            return Response({"error": _("Неверный код")}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"message": _("Код успешно подтвержден")}, status=status.HTTP_200_OK)
 
 class ResetPasswordView(BaseAPIView):
     throttle_classes = [AnonRateThrottle, ScopedRateThrottle]
@@ -272,22 +264,13 @@ class ResetPasswordView(BaseAPIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Проверяем код подтверждения
-        try:
-            confirmation_code = EmailConfirmationCode.objects.get(email=email)
-        except EmailConfirmationCode.DoesNotExist:
+        ok, error_message = PasswordResetService.verify_code(email, code, consume=True)
+        if not ok:
             return Response(
-                {"error": _("Неверный Email или код")},
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": error_message},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if confirmation_code.code != code:
-            return Response(
-                {"error": _("Неверный код")},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Проверяем существование пользователя
         try:
             user = User.objects.get(email=email)
         except User.DoesNotExist:
@@ -296,12 +279,9 @@ class ResetPasswordView(BaseAPIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Устанавливаем новый пароль
         user.set_password(new_password)
         user.save()
-
-        # Удаляем использованный код
-        confirmation_code.delete()
+        revoke_user_auth(user)
 
         audit_log('user.password_reset', request=request, actor=user, severity='security',
                      entity={'type': 'user', 'label': user.get_full_name() or user.username})

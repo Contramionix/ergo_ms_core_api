@@ -18,10 +18,12 @@ from src.core.cms.adp.serializers import (
 )
 from src.core.cms.adp.services.profile_settings import ProfileSettingsService
 from src.core.cms.adp.services.session_devices import (
+    get_request_device_id,
     is_current_device,
     revoke_user_device_session,
     touch_device_activity,
 )
+from src.core.cms.adp.services.user_deletion import revoke_user_auth
 from src.core.audit.shortcuts import audit_log
 from src.core.utils.base.base_views import BaseAPIViewAuthMixin
 from src.core.utils.methods import parse_errors_to_dict
@@ -68,6 +70,7 @@ class ChangePasswordView(BaseAPIViewAuthMixin):
             user = request.user
             user.set_password(serializer.validated_data['new_password'])
             user.save()
+            revoke_user_auth(user, except_device_id=get_request_device_id(request))
 
             audit_log('user.password_changed', request=request, actor=user, severity='security',
                          entity={'type': 'user', 'label': user.get_full_name() or user.username})

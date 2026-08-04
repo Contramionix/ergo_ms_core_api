@@ -54,17 +54,33 @@ def delete_admin_user(user: User) -> None:
     )
 
 
-def revoke_user_auth(user: User) -> None:
+def revoke_user_auth(user: User, *, except_device_id: int | None = None) -> None:
+    """
+    Отзывает сессии и refresh-токены пользователя.
+
+    except_device_id: не деактивировать это устройство и не blacklist его jti.
+    """
     from src.core.cms.adp.services.session_devices import invalidate_device_session_cache
 
-    UserDevice.objects.filter(user=user).update(is_active=False)
+    devices_qs = UserDevice.objects.filter(user=user)
+    except_jti = None
+    if except_device_id is not None:
+        except_device = devices_qs.filter(pk=except_device_id).only('outstanding_token_jti').first()
+        if except_device is not None:
+            except_jti = except_device.outstanding_token_jti or None
+        devices_qs = devices_qs.exclude(pk=except_device_id)
+
+    devices_qs.update(is_active=False)
     invalidate_device_session_cache(user.id)
     presence_service.reset_user(user.id)
 
     try:
         from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
 
-        for outstanding in OutstandingToken.objects.filter(user=user):
+        outstanding_qs = OutstandingToken.objects.filter(user=user)
+        if except_jti:
+            outstanding_qs = outstanding_qs.exclude(jti=except_jti)
+        for outstanding in outstanding_qs:
             BlacklistedToken.objects.get_or_create(token=outstanding)
     except Exception:
         pass
