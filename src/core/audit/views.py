@@ -1,10 +1,11 @@
 import csv
+import re
 import uuid
 
 from django.db import connection
 from django.http import HttpResponse
 from django.utils.dateparse import parse_datetime
-from rest_framework import permissions, viewsets
+from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
@@ -12,6 +13,7 @@ from src.core.cms.adp.services.permissions import PermissionService
 from src.core.utils.mixins import SwaggerSafeMixin
 
 from . import catalog
+from .core_actions import MODULE, SETTINGS_MODULE, UNDO_PERFORMED
 from .dimensions import (
     get_dimensions_for_ui,
     get_read_guard_dimensions,
@@ -21,6 +23,9 @@ from .models import AuditEvent
 from .pagination import AuditPagination
 from .permissions import CanReadAuditLog
 from .serializers import AuditEventDetailSerializer, AuditEventListSerializer
+from .service import AuditService
+
+_UNDO_KIND_RE = re.compile(r'^[a-z][a-z0-9_.-]{0,63}$')
 
 
 class AuditEventViewSet(SwaggerSafeMixin, viewsets.ReadOnlyModelViewSet):
@@ -138,9 +143,25 @@ class AuditEventViewSet(SwaggerSafeMixin, viewsets.ReadOnlyModelViewSet):
         if source_module:
             qs = qs.filter(source_module=source_module)
 
-        action_value = params.get('action')
-        if action_value:
-            qs = qs.filter(action=action_value)
+        actions_csv = (params.get('actions') or '').strip()
+        if actions_csv:
+            actions = [item.strip() for item in actions_csv.split(',') if item.strip()][:20]
+            if actions:
+                qs = qs.filter(action__in=actions)
+        else:
+            action_value = params.get('action')
+            if action_value:
+                qs = qs.filter(action=action_value)
+
+        exclude_actions_csv = (params.get('exclude_actions') or '').strip()
+        if exclude_actions_csv:
+            exclude_actions = [
+                item.strip()
+                for item in exclude_actions_csv.split(',')
+                if item.strip()
+            ][:20]
+            if exclude_actions:
+                qs = qs.exclude(action__in=exclude_actions)
 
         severity = params.get('severity')
         if severity:
@@ -195,7 +216,6 @@ class AuditEventViewSet(SwaggerSafeMixin, viewsets.ReadOnlyModelViewSet):
             # Поля для JSON-списка не нужны; source_module/action оставляем для каталога.
             qs = qs.defer(
                 'changes',
-                'meta',
                 'user_agent',
                 'request_id',
                 'scope',
@@ -217,6 +237,68 @@ class AuditEventViewSet(SwaggerSafeMixin, viewsets.ReadOnlyModelViewSet):
             return scope
 
         return self._read_scope_values() or {}
+
+    @action(
+        detail=False,
+        methods=['post'],
+        url_path='record-undo',
+        permission_classes=[permissions.IsAuthenticated],
+    )
+    def record_undo(self, request):
+        """Зафиксировать отмену любого действия (toast Undo и аналоги).
+
+        Пишет универсальное ``undo.performed``; детали — в kind/label/meta.
+        Инициатор всегда текущий пользователь (подделать нельзя).
+        """
+        kind = str(request.data.get('kind') or '').strip()
+        label = str(request.data.get('label') or '').strip()[:255]
+        entity_label = str(request.data.get('entity_label') or label or kind)[:255]
+        entity_type = str(request.data.get('entity_type') or 'action')[:64]
+        entity_ref = str(request.data.get('entity_ref') or '')[:128]
+        source_module = str(request.data.get('source_module') or MODULE).strip()[:64]
+        raw_meta = request.data.get('meta')
+
+        if not kind or not _UNDO_KIND_RE.match(kind):
+            return Response(
+                {'error': 'Некорректный тип отмены'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not label:
+            return Response(
+                {'error': 'Укажите описание отменённого действия'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        known_modules = {
+            item.get('module') for item in catalog.get_modules() if item.get('module')
+        }
+        known_modules.update({MODULE, SETTINGS_MODULE})
+        if source_module not in known_modules:
+            source_module = MODULE
+
+        meta = {'undo_kind': kind, 'undo_label': label}
+        if isinstance(raw_meta, dict):
+            for key, value in list(raw_meta.items())[:20]:
+                key_str = str(key)[:64]
+                if key_str in meta:
+                    continue
+                if isinstance(value, (str, int, float, bool)) or value is None:
+                    meta[key_str] = value if not isinstance(value, str) else value[:500]
+
+        AuditService.record(
+            action=UNDO_PERFORMED,
+            source_module=source_module,
+            request=request,
+            actor=request.user,
+            entity={
+                'type': entity_type or 'action',
+                'ref': entity_ref,
+                'label': entity_label or label,
+            },
+            meta=meta,
+            severity='info',
+        )
+        return Response({'ok': True})
 
     @action(detail=False, methods=['get'], url_path='catalog')
     def catalog(self, request):

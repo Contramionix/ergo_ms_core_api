@@ -22,6 +22,8 @@ CATEGORY_MENU = 'menu'
 CATEGORY_MENU_LABEL = 'Меню'
 CATEGORY_SETTINGS = 'settings'
 CATEGORY_SETTINGS_LABEL = 'Настройки'
+CATEGORY_UNDO = 'undo'
+CATEGORY_UNDO_LABEL = 'Отмены изменений'
 
 # --- Аутентификация ---
 AUTH_LOGIN = 'auth.login'
@@ -76,6 +78,11 @@ SETTINGS_CHANGED = 'settings.changed'
 THEME_CREATED = 'theme.created'
 THEME_UPDATED = 'theme.updated'
 THEME_DELETED = 'theme.deleted'
+# Устарело: новые отмены пишутся как UNDO_PERFORMED; оставляем для старых записей.
+THEME_UNDONE = 'theme.undone'
+
+# --- Отмены (toast Undo и аналоги) ---
+UNDO_PERFORMED = 'undo.performed'
 
 _SEC = AuditEvent.SEVERITY_SECURITY
 _INFO = AuditEvent.SEVERITY_INFO
@@ -167,6 +174,9 @@ CORE_AUDIT_SECTION = {
         _menu(MENU_ITEM_CREATED, 'Пункт меню создан', 'ListPlus'),
         _menu(MENU_ITEM_UPDATED, 'Пункт меню изменён', 'ListTree'),
         _menu(MENU_ITEM_DELETED, 'Пункт меню удалён', 'ListX'),
+
+        _a(UNDO_PERFORMED, 'Отмена изменения', icon='Undo2',
+           category=CATEGORY_UNDO, category_label=CATEGORY_UNDO_LABEL),
     ],
 }
 
@@ -183,5 +193,9 @@ CORE_SETTINGS_SECTION = {
            category=CATEGORY_SETTINGS, category_label=CATEGORY_SETTINGS_LABEL),
         _a(THEME_DELETED, 'Тема удалена', icon='Palette',
            category=CATEGORY_SETTINGS, category_label=CATEGORY_SETTINGS_LABEL),
+        _a(THEME_UNDONE, 'Отмена изменения темы', icon='Undo2',
+           category=CATEGORY_UNDO, category_label=CATEGORY_UNDO_LABEL),
+        _a(UNDO_PERFORMED, 'Отмена изменения', icon='Undo2',
+           category=CATEGORY_UNDO, category_label=CATEGORY_UNDO_LABEL),
     ],
 }
