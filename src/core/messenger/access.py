@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import logging
+
 from django.contrib.contenttypes.models import ContentType
 
 from src.core.messenger.utils import get_content_type
 
+logger = logging.getLogger(__name__)
+
 
 def has_messenger_access(user, content_type_name: str, object_id: int) -> bool:
-    """Проверка доступа к чату по content_type и object_id (как в MessageViewSet)."""
+    """Проверка доступа к чату по content_type и object_id.
+
+    Модели с обсуждениями обязаны реализовать
+    ``has_messenger_access(self, user) -> bool``. Без метода — отказ (deny-by-default).
+    """
     if user is None or not getattr(user, 'is_authenticated', False):
         return False
 
@@ -27,9 +35,19 @@ def has_messenger_access(user, content_type_name: str, object_id: int) -> bool:
     except model_class.DoesNotExist:
         return False
 
-    if hasattr(obj, 'has_messenger_access'):
-        return obj.has_messenger_access(user)
-    return True
+    checker = getattr(obj, 'has_messenger_access', None)
+    if not callable(checker):
+        return False
+
+    try:
+        return bool(checker(user))
+    except Exception:
+        logger.exception(
+            'has_messenger_access failed for %s pk=%s',
+            content_type_name,
+            object_id,
+        )
+        return False
 
 
 def get_content_type_name(content_type: ContentType) -> str:
