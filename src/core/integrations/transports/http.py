@@ -122,7 +122,17 @@ class HttpTransport:
         base = resolve_op_base_url(name)
         if not base:
             return False
-        return self._remote_has(base, name)
+        try:
+            return self._remote_has(base, name)
+        except Exception:
+            # Недоступный peer при старте/проверках — как отсутствие провайдера.
+            logger.debug(
+                "Bridge HTTP has(%s) failed via %s",
+                name,
+                base,
+                exc_info=True,
+            )
+            return False
 
     def call(
         self,
@@ -187,11 +197,18 @@ class HttpTransport:
         with self._lock:
             return dict(self._groups.get(group, {}))
 
-    def _headers(self) -> dict[str, str]:
+    def _headers(self, base: str | None = None) -> dict[str, str]:
         headers = {'Accept': 'application/json', 'Content-Type': 'application/json'}
         token = _internal_token()
         if token:
             headers[_TOKEN_HEADER] = token
+        # Compose-имена modules/<name> часто с ``_``; для Django Host это не RFC-hostname.
+        if base:
+            from urllib.parse import urlparse
+
+            host = (urlparse(base).hostname or '').strip()
+            if '_' in host:
+                headers['Host'] = 'localhost'
         return headers
 
     def _remote_call(
@@ -208,7 +225,7 @@ class HttpTransport:
         }
         url = f'{base}/internal/bridge/call'
         with httpx.Client(timeout=_timeout()) as client:
-            response = client.post(url, json=payload, headers=self._headers())
+            response = client.post(url, json=payload, headers=self._headers(base))
             response.raise_for_status()
             data = response.json()
         if isinstance(data, dict) and 'result' in data:
@@ -221,7 +238,7 @@ class HttpTransport:
             response = client.get(
                 url,
                 params={'op': name},
-                headers=self._headers(),
+                headers=self._headers(base),
             )
             response.raise_for_status()
             data = response.json()
@@ -233,7 +250,7 @@ class HttpTransport:
             response = client.get(
                 url,
                 params={'group': group},
-                headers=self._headers(),
+                headers=self._headers(base),
             )
             response.raise_for_status()
             data = response.json()

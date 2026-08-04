@@ -22,6 +22,14 @@ from src.config.settings.base import MODULES_DIR
 logger = logging.getLogger('utils')
 
 
+def _microservice_peer_names() -> frozenset[str]:
+    """Имена модулей из MICROSERVICE_MODULES (доступны в другом процессе через мост)."""
+    import os
+
+    raw = os.environ.get('MICROSERVICE_MODULES', '') or ''
+    return frozenset(m.strip() for m in raw.split(',') if m.strip())
+
+
 def module_name_from_app(app_path: str) -> str | None:
     """``modules.<name>.api`` → ``<name>``; иначе None."""
     if not app_path.startswith('modules.'):
@@ -113,9 +121,19 @@ def _topo_sort_modules(
     indegree = {name: 0 for name in module_names}
     edges: Dict[str, List[str]] = defaultdict(list)
 
+    remote_peers = _microservice_peer_names()
     for name in module_names:
         for dep in requires.get(name, ()):
             if dep not in name_set:
+                # MODULE_RUNTIME=microservice: зависимость в другом HTTP-процессе.
+                if dep in remote_peers:
+                    logger.debug(
+                        'module_requires: %r → %r пропущен в этом процессе '
+                        '(peer из MICROSERVICE_MODULES)',
+                        name,
+                        dep,
+                    )
+                    continue
                 raise ImproperlyConfigured(
                     f"Модуль {name!r} объявил module_requires={(requires.get(name),)}: "
                     f"зависимость {dep!r} не найдена среди установленных модулей "
