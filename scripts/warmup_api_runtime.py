@@ -61,6 +61,7 @@ def _probe_ready(url: str) -> tuple[str, dict | None]:
     """
     Возвращает (status, payload):
     - ready — ready=true
+    - maintenance — API отвечает 503 с code=maintenance (процесс жив)
     - not_ready — HTTP 503 / ready=false
     - http_error — другой HTTP-код
     - unreachable — сеть / таймаут / не JSON
@@ -84,6 +85,8 @@ def _probe_ready(url: str) -> tuple[str, dict | None]:
                 payload = json.loads(body)
             except json.JSONDecodeError:
                 payload = None
+        if payload and payload.get('code') == 'maintenance':
+            return 'maintenance', payload
         if exc.code == 503:
             return 'not_ready', payload
         return 'http_error', payload
@@ -97,7 +100,7 @@ def wait_until_api_ready(
     timeout_sec: float | None = None,
     interval_sec: float | None = None,
 ) -> int:
-    """Ждёт ready=true. 0 — успех, 1 — таймаут."""
+    """Ждёт ready=true или ответ обслуживания. 0 — успех, 1 — таймаут."""
     _configure_stdio_utf8()
 
     if os.environ.get('ERGO_SKIP_API_READY_WAIT', '').strip().lower() in ('1', 'true', 'yes'):
@@ -137,6 +140,13 @@ def wait_until_api_ready(
 
         if status == 'ready':
             _log('ok', f'API готов: {ready_url}')
+            return 0
+
+        if status == 'maintenance':
+            _log(
+                'ok',
+                f'API отвечает, включён режим технических работ: {ready_url}',
+            )
             return 0
 
         if status == 'not_ready' and payload and not reported_checks:

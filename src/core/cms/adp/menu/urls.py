@@ -14,6 +14,7 @@ from .views import (
     MenuAccessLogView,
     AvailableIconsView,
     MenuRestoreView,
+    MenuRestoreUndoView,
 )
 
 urlpatterns = [
@@ -25,5 +26,6 @@ urlpatterns = [
     path('separators/<uuid:separator_ref>/', MenuSeparatorDetailView.as_view(), name='menu_separator_detail'),
     path('access-log/', MenuAccessLogView.as_view(), name='menu_access_log'),
     path('available-icons/', AvailableIconsView.as_view(), name='available_icons'),
+    path('restore/undo/', MenuRestoreUndoView.as_view(), name='menu_restore_undo'),
     path('restore/', MenuRestoreView.as_view(), name='menu_restore'),
 ]

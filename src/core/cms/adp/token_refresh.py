@@ -3,8 +3,10 @@ from datetime import timedelta
 
 from django.contrib.auth import get_user_model
 from django.utils.translation import gettext as _
+from django.core.exceptions import ImproperlyConfigured
 from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
+from rest_framework.throttling import SimpleRateThrottle
 from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenRefreshView
@@ -15,6 +17,10 @@ from src.core.cms.adp.auth_cookies import (
     set_refresh_cookie,
 )
 from src.core.cms.adp.models import UserDevice
+from src.core.cms.adp.services.jwt_platform_claims import (
+    attach_platform_auth_claims,
+    copy_platform_auth_claims,
+)
 from src.core.cms.adp.services.session_bootstrap import build_session_bootstrap_payload
 from src.core.cms.adp.services.session_devices import (
     bind_device_to_refresh_token,
@@ -38,6 +44,7 @@ class DeviceBoundTokenRefreshSerializer(TokenRefreshSerializer):
         refresh = RefreshToken(refresh_value)
         device_id = refresh.payload.get('device_id')
         user_id = refresh.payload.get('user_id')
+        user = None
 
         if device_id is None:
             raise ValidationError(_('Сессия завершена. Войдите снова.'))
@@ -75,12 +82,40 @@ class DeviceBoundTokenRefreshSerializer(TokenRefreshSerializer):
 
         access = active_refresh.access_token
         access['device_id'] = device_id
+        if user is not None:
+            attach_platform_auth_claims(active_refresh, user)
+            attach_platform_auth_claims(access, user)
+            if rotated_value:
+                data['refresh'] = str(active_refresh)
+        else:
+            copy_platform_auth_claims(active_refresh.payload, access)
         data['access'] = str(access)
         return data
 
 
+class TokenRefreshRateThrottle(SimpleRateThrottle):
+    """Отдельный бакет для F5/restore; rate из settings или запасной 60/minute."""
+
+    scope = 'token_refresh'
+
+    def get_cache_key(self, request, view):
+        ident = self.get_ident(request)
+        if ident is None:
+            return None
+        return self.cache_format % {'scope': self.scope, 'ident': ident}
+
+    def get_rate(self):
+        try:
+            return super().get_rate()
+        except ImproperlyConfigured:
+            return '60/minute'
+
+
 class DeviceBoundTokenRefreshView(TokenRefreshView):
     serializer_class = DeviceBoundTokenRefreshSerializer
+    # Не AnonRateThrottle: F5 без Bearer иначе делит общий anon-бакет
+    # с гостевыми запросами и выглядит как разлогин.
+    throttle_classes = [TokenRefreshRateThrottle]
 
     def post(self, request, *args, **kwargs):
         response = super().post(request, *args, **kwargs)

@@ -44,11 +44,10 @@ INSTALLED_APPS = ALL_MODULES + [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    'django_extensions',
     'rest_framework',
     'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
-    'drf_yasg',
+    'drf_spectacular',
     'django_celery_beat',
 ]
 

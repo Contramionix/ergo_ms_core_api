@@ -5,7 +5,7 @@ Management command: восстановление меню из populate-функ
 Пересоздаёт каталог (MenuItem/MenuSeparator), сохраняя:
 - layout (order/parent/is_active, якоря разделителей) в MenuLayoutPlacement /
   MenuSeparatorLayout;
-- настройки доступа (allowed_roles / allowed_role_groups);
+- настройки доступа пунктов и разделителей (allowed_roles / allowed_role_groups);
 - админские пункты с catalog_key ``admin::*``.
 """
 
@@ -53,20 +53,43 @@ def _menu_access_legacy_key(item) -> tuple:
     )
 
 
+def _access_payload(obj):
+    role_ids = list(obj.allowed_roles.values_list('id', flat=True))
+    group_ids = list(obj.allowed_role_groups.values_list('id', flat=True))
+    if not role_ids and not group_ids:
+        return None
+    return {'roles': role_ids, 'groups': group_ids}
+
+
+def _apply_access_payload(obj, mapping):
+    if mapping.get('roles'):
+        obj.allowed_roles.set(mapping['roles'])
+    if mapping.get('groups'):
+        obj.allowed_role_groups.set(mapping['groups'])
+
+
 def _save_access_map():
-    """Сохраняет доступ: catalog_key → {roles, groups}; плюс legacy-ключ."""
+    """Сохраняет доступ: catalog_key → {roles, groups}; плюс legacy-ключ для пунктов."""
     access_map = {}
     for item in MenuItem.objects.select_related('parent').prefetch_related(
         'allowed_roles', 'allowed_role_groups',
     ).all():
-        role_ids = list(item.allowed_roles.values_list('id', flat=True))
-        group_ids = list(item.allowed_role_groups.values_list('id', flat=True))
-        if not role_ids and not group_ids:
+        payload = _access_payload(item)
+        if payload is None:
             continue
-        payload = {'roles': role_ids, 'groups': group_ids}
         if getattr(item, 'catalog_key', None):
             access_map[('catalog', item.catalog_key)] = payload
         access_map[('legacy', _menu_access_legacy_key(item))] = payload
+
+    for separator in MenuSeparator.objects.prefetch_related(
+        'allowed_roles', 'allowed_role_groups',
+    ).all():
+        payload = _access_payload(separator)
+        if payload is None:
+            continue
+        if getattr(separator, 'catalog_key', None):
+            access_map[('catalog', separator.catalog_key)] = payload
+        access_map[('separator', separator.public_id)] = payload
     return access_map
 
 
@@ -80,10 +103,17 @@ def _restore_access_map(access_map):
             mapping = access_map.get(('legacy', _menu_access_legacy_key(item)))
         if mapping is None:
             continue
-        if mapping.get('roles'):
-            item.allowed_roles.set(mapping['roles'])
-        if mapping.get('groups'):
-            item.allowed_role_groups.set(mapping['groups'])
+        _apply_access_payload(item, mapping)
+
+    for separator in MenuSeparator.objects.all():
+        mapping = None
+        if getattr(separator, 'catalog_key', None):
+            mapping = access_map.get(('catalog', separator.catalog_key))
+        if mapping is None:
+            mapping = access_map.get(('separator', separator.public_id))
+        if mapping is None:
+            continue
+        _apply_access_payload(separator, mapping)
 
 
 def _reapply_module_sidebar_role_groups(module_names):
@@ -186,6 +216,11 @@ def _discover_core_menu_migrations():
                 continue
             code = op.code
             if code is None or code is migrations.RunPython.noop:
+                continue
+            # remove_*/reverse_* — очистка, не seed; в squash после add_* ломают
+            # restore (CASCADE на таблицы модулей, которых ещё нет в цепочке migrate).
+            func_name = getattr(code, '__name__', '') or ''
+            if func_name.startswith(('remove_', 'reverse_', 'delete_')):
                 continue
             forward_src = _callable_source(code)
             if not any(marker in forward_src for marker in MENU_MARKERS):
@@ -458,4 +493,10 @@ class Command(BaseCommand):
         if populated_modules:
             _reapply_module_sidebar_role_groups(populated_modules)
             self.stdout.write('Повторно применены allowed_role_groups модулей с menu_sidebar')
+
+        from src.core.cms.adp.menu.menu_cache import invalidate_user_menu_cache
+
+        invalidate_user_menu_cache()
+        self.stdout.write('Сброшен серверный кэш меню')
+
         self.stdout.write(self.style.SUCCESS('Готово. Обновите страницу (F5) для отображения меню.'))

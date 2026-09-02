@@ -45,3 +45,19 @@ except Exception as e:
         }
     }
     logger.warning("Используется fallback конфигурация SQLite")
+
+from src.core.utils.database.module_schema import apply_search_path_options  # noqa: E402
+
+DATABASES = apply_search_path_options(DATABASES)
+
+# alias БД модуля: секция YAML с полем module: <имя_папки>
+MODULE_DATABASE_ALIASES = {}
+for _alias, _cfg in DATABASES.items():
+    if not isinstance(_cfg, dict):
+        continue
+    # Django-конфиг не содержит module; смотрим raw YAML через extra ключ OPTIONS
+    extra_module = (_cfg.get('MODULE') or _cfg.get('module') or '').strip()
+    if extra_module:
+        MODULE_DATABASE_ALIASES[extra_module] = _alias
+
+DATABASE_ROUTERS = ['src.core.utils.database.routers.ModuleDatabaseRouter']

@@ -8,8 +8,7 @@ from django.contrib.auth.models import update_last_login
 from django.utils.translation import gettext as _
 
 User = get_user_model()
-from drf_yasg import openapi
-from drf_yasg.utils import swagger_auto_schema
+from src.core.utils.swagger.yasg_compat import swagger_auto_schema, openapi
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.serializers import ValidationError as DRFValidationError
@@ -22,6 +21,7 @@ from src.core.cms.adp.auth_cookies import (
     refresh_cookie_max_age,
     set_refresh_cookie,
 )
+from src.core.cms.adp.backends import get_user_by_login
 from src.core.cms.adp.models import UserDevice, UserProfile
 from src.core.cms.adp.password_policy import validate_new_password_pair
 from src.core.cms.adp.serializers import (
@@ -29,6 +29,14 @@ from src.core.cms.adp.serializers import (
     UserRegistrationSerializer,
     UserRegistrationValidationSerializer,
 )
+from src.core.cms.adp.services.login_lockout import (
+    clear_login_lockout,
+    is_login_locked,
+    login_lock_retry_after,
+    register_failed_login,
+)
+from src.core.cms.adp.services.registration import RegistrationService
+from src.core.utils.exception_handler import too_many_requests_message
 from src.core.cms.adp.services.password_reset import PasswordResetService
 from src.core.cms.adp.services.profile_settings import ProfileSettingsService
 from src.core.cms.adp.services.session_devices import (
@@ -37,6 +45,7 @@ from src.core.cms.adp.services.session_devices import (
     bind_device_to_refresh_token,
 )
 from src.core.cms.adp.services.user_deletion import revoke_user_auth
+from src.core.cms.adp.services.jwt_platform_claims import attach_platform_auth_claims
 from src.core.cms.adp.session_context_tokens import ScopedSessionRefreshToken
 from src.core.integrations import bridge
 from src.core.integrations.module_contracts import SESSION_RESTORE_CLAIMS
@@ -45,7 +54,7 @@ from src.core.cms.adp.user_agent_utils import (
     detect_device_type,
     get_client_ip,
 )
-from src.core.utils.base.base_views import BaseAPIView
+from src.core.utils.base.base_views import BaseAPIViewPublicMixin
 from src.core.utils.methods import parse_errors_to_dict, send_confirmation_email
 from src.config.settings.auth import get_token_lifetime
 from src.core.audit.shortcuts import audit_log
@@ -53,7 +62,20 @@ from src.core.audit.shortcuts import audit_log
 logger = logging.getLogger(__name__)
 
 
-class UserRegistrationValidationView(BaseAPIView):
+def _too_many_login_attempts_response(username: str) -> Response:
+    retry_after = login_lock_retry_after(username)
+    return Response(
+        {'detail': too_many_requests_message()},
+        status=status.HTTP_429_TOO_MANY_REQUESTS,
+        headers={'Retry-After': str(retry_after)},
+    )
+
+
+class UserRegistrationValidationView(BaseAPIViewPublicMixin):
+    # ScopedRateThrottle — иначе только общий anon (перебор логинов/email).
+    throttle_classes = [AnonRateThrottle, ScopedRateThrottle]
+    throttle_scope = 'registration'
+
     @swagger_auto_schema(
         operation_description="Регистрация нового пользователя.",
         request_body=openapi.Schema(
@@ -93,6 +115,10 @@ class UserRegistrationValidationView(BaseAPIView):
         },
     )
     def post(self, request):
+        closed = RegistrationService.reject_if_registration_closed()
+        if closed:
+            return closed
+
         serializer = UserRegistrationValidationSerializer(data=request.data)
 
         if serializer.is_valid():
@@ -108,7 +134,7 @@ class UserRegistrationValidationView(BaseAPIView):
             status=status.HTTP_400_BAD_REQUEST
         )
 
-class PasswordResetSettingsView(BaseAPIView):
+class PasswordResetSettingsView(BaseAPIViewPublicMixin):
     """Публичные настройки восстановления пароля."""
 
     @swagger_auto_schema(
@@ -119,7 +145,7 @@ class PasswordResetSettingsView(BaseAPIView):
         return Response(PasswordResetService.get_public_settings())
 
 
-class SendConfirmationCodeView(BaseAPIView):
+class SendConfirmationCodeView(BaseAPIViewPublicMixin):
     # ScopedRateThrottle — единственный класс, который читает throttle_scope;
     # без него действовал только общий anon-лимит (см. security-audit.md, В1).
     throttle_classes = [AnonRateThrottle, ScopedRateThrottle]
@@ -127,51 +153,55 @@ class SendConfirmationCodeView(BaseAPIView):
 
     @swagger_auto_schema(
         operation_description="Отправка кода подтверждения.",
-    )   
+    )
     def post(self, request):
         purpose = request.data.get('purpose', '')
-        is_password_reset = PasswordResetService.is_password_reset_purpose(purpose)
-        if is_password_reset and not PasswordResetService.is_enabled():
+        if not PasswordResetService.is_password_reset_purpose(purpose):
+            return Response(
+                {'error': _('Укажите purpose=password_reset')},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not PasswordResetService.is_enabled():
             return Response(
                 {'error': PasswordResetService.get_disabled_message()},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        if is_password_reset and not PasswordResetService.is_email_delivery_ready():
+        if not PasswordResetService.is_email_delivery_ready():
             return Response(
                 {'error': PasswordResetService.get_unavailable_message()},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        email = request.data.get("email")
+        email = request.data.get('email')
         if not email:
-            return Response({"error": _("Отсутствует Email")}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': _('Отсутствует Email')}, status=status.HTTP_400_BAD_REQUEST)
 
-        user_exists = User.objects.filter(email=email).exists()
-        if not user_exists:
-            return Response(
-                {"message": _("Если пользователь с таким email существует, код будет отправлен")},
-                status=status.HTTP_200_OK,
-            )
-
-        code = PasswordResetService.issue_code(email)
-        success, error_message = send_confirmation_email(email, code)
-
-        if not success:
-            return Response(
-                {
-                    "error": _("Не удалось отправить письмо с кодом восстановления."),
-                    "detail": error_message or _("Проверьте настройки SMTP."),
-                    "email_sent": False,
-                },
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-
-        return Response(
-            {"message": _("Код подтверждения отправлен"), "email_sent": True},
+        # Один ответ для «нет пользователя» / успех / сбой SMTP — без enumeration.
+        generic_ok = Response(
+            {
+                'message': _(
+                    'Если пользователь с таким email существует, код будет отправлен'
+                ),
+            },
             status=status.HTTP_200_OK,
         )
 
-class VerifyConfirmationCodeView(BaseAPIView):
+        user_exists = User.objects.filter(email__iexact=(email or '').strip()).exists()
+        if not user_exists:
+            return generic_ok
+
+        code = PasswordResetService.issue_code(email)
+        success, error_message = send_confirmation_email(email, code)
+        if not success:
+            logger.error(
+                'Не удалось отправить код восстановления пароля на %s: %s',
+                email,
+                error_message or 'unknown',
+            )
+        return generic_ok
+
+
+class VerifyConfirmationCodeView(BaseAPIViewPublicMixin):
     throttle_classes = [AnonRateThrottle, ScopedRateThrottle]
     throttle_scope = 'password_reset'
 
@@ -191,7 +221,7 @@ class VerifyConfirmationCodeView(BaseAPIView):
 
         return Response({"message": _("Код успешно подтвержден")}, status=status.HTTP_200_OK)
 
-class ResetPasswordView(BaseAPIView):
+class ResetPasswordView(BaseAPIViewPublicMixin):
     throttle_classes = [AnonRateThrottle, ScopedRateThrottle]
     throttle_scope = 'password_reset'
 
@@ -291,7 +321,10 @@ class ResetPasswordView(BaseAPIView):
             status=status.HTTP_200_OK
         )
         
-class UserRegistrationView(BaseAPIView):
+class UserRegistrationView(BaseAPIViewPublicMixin):
+    throttle_classes = [AnonRateThrottle, ScopedRateThrottle]
+    throttle_scope = 'registration'
+
     @swagger_auto_schema(
         operation_description="Проверка регистрации.",
         request_body=openapi.Schema(
@@ -331,6 +364,10 @@ class UserRegistrationView(BaseAPIView):
         },
     )
     def post(self, request):
+        closed = RegistrationService.reject_if_registration_closed()
+        if closed:
+            return closed
+
         serializer = UserRegistrationSerializer(data=request.data)
 
         if serializer.is_valid():
@@ -339,8 +376,7 @@ class UserRegistrationView(BaseAPIView):
             successful_response = Response(
                 {
                     "message": _("Регистрация успешна."),
-                    "user_id": user.id,
-                    "username": user.username
+                    "username": user.username,
                 },
                 status=status.HTTP_201_CREATED
             )
@@ -352,7 +388,7 @@ class UserRegistrationView(BaseAPIView):
             status=status.HTTP_400_BAD_REQUEST
         )
 
-class UserAuthorizationView(BaseAPIView):
+class UserAuthorizationView(BaseAPIViewPublicMixin):
     # ScopedRateThrottle — единственный класс, который читает throttle_scope;
     # без него действовал только общий anon-лимит (см. security-audit.md, В1).
     throttle_classes = [AnonRateThrottle, ScopedRateThrottle]
@@ -365,7 +401,7 @@ class UserAuthorizationView(BaseAPIView):
             properties={
                 'username': openapi.Schema(
                     type=openapi.TYPE_STRING,
-                    description='Логин'
+                    description='Логин или email'
                 ),
                 'password': openapi.Schema(
                     type=openapi.TYPE_STRING,
@@ -385,7 +421,6 @@ class UserAuthorizationView(BaseAPIView):
                     description="Пользователь успешно авторизован.",
                     examples={
                         "application/json": {
-                            "refresh": "your_refresh_token",
                             "access": "your_access_token"
                         }
                     }
@@ -401,9 +436,19 @@ class UserAuthorizationView(BaseAPIView):
             password = serializer.validated_data['password']
             remember_me = request.data.get('remember_me', False)
 
+            if is_login_locked(username):
+                audit_log(
+                    'auth.login_failed',
+                    request=request,
+                    severity='security',
+                    meta={'username': username, 'reason': 'lockout'},
+                )
+                return _too_many_login_attempts_response(username)
+
             user = authenticate(request, username=username, password=password)
 
             if user is not None:
+                clear_login_lockout(username)
                 update_last_login(None, user)
                 device = self._create_or_update_device(request, user)
 
@@ -427,10 +472,12 @@ class UserAuthorizationView(BaseAPIView):
                     user,
                     **restore_claims,
                 )
+                attach_platform_auth_claims(refresh, user)
                 refresh.set_exp(lifetime=refresh_lifetime)
 
                 access_token = refresh.access_token
                 access_token.set_exp(lifetime=access_lifetime)
+                attach_platform_auth_claims(access_token, user)
                 bind_device_to_refresh_token(device, refresh)
                 attach_device_to_refresh_token(refresh, device)
                 attach_device_claim(access_token, device)
@@ -453,12 +500,12 @@ class UserAuthorizationView(BaseAPIView):
                 )
                 return response
 
-            inactive_user = (
-                User.objects
-                .filter(username=username, is_active=False)
-                .first()
-            )
-            if inactive_user is not None and inactive_user.check_password(password):
+            inactive_user = get_user_by_login(username)
+            if (
+                inactive_user is not None
+                and not inactive_user.is_active
+                and inactive_user.check_password(password)
+            ):
                 audit_log(
                     'auth.login_failed',
                     request=request,
@@ -472,12 +519,18 @@ class UserAuthorizationView(BaseAPIView):
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
+            locked = register_failed_login(username)
             audit_log(
                 'auth.login_failed',
                 request=request,
                 severity='security',
-                meta={'username': username},
+                meta={
+                    'username': username,
+                    **({'reason': 'lockout'} if locked else {}),
+                },
             )
+            if locked:
+                return _too_many_login_attempts_response(username)
             return Response(
                 {
                     "message": _("Неверные учетные данные.")

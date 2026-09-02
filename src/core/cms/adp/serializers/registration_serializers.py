@@ -28,11 +28,13 @@ class UserRegistrationValidationSerializer(Serializer):
     invitation_token = CharField(required=False, allow_blank=True, write_only=True)
 
     def validate_username(self, value):
+        RegistrationService.ensure_registration_open()
         if User.objects.filter(username=value).exists():
             raise ValidationError(_("Данный логин уже занят, попробуйте другой."))
         return value
 
     def validate_email(self, value):
+        RegistrationService.ensure_registration_open()
         normalized = (value or '').strip().lower()
         error = RegistrationService.validate_email_for_registration(normalized)
         if error:
@@ -47,7 +49,7 @@ class UserRegistrationValidationSerializer(Serializer):
 def _validate_registration_access(attrs):
     mode = RegistrationService.get_mode()
     if mode == RegistrationService.MODE_CLOSED:
-        raise ValidationError({'message': _('Регистрация в системе отключена.')})
+        raise ValidationError({'message': RegistrationService.registration_disabled_message()})
 
     if mode != RegistrationService.MODE_INVITATION:
         return
@@ -80,6 +82,11 @@ class UserRegistrationSerializer(ModelSerializer):
             'first_name', 'last_name', 'middle_name', 'username', 'email',
             'password', 'invitation_token',
         ]
+        # UniqueValidator иначе срабатывает до validate_* и утекает при closed.
+        extra_kwargs = {
+            'username': {'validators': []},
+            'email': {'validators': []},
+        }
 
     def validate_password(self, value):
         try:
@@ -88,7 +95,14 @@ class UserRegistrationSerializer(ModelSerializer):
             raise ValidationError(list(exc.messages))
         return value
 
+    def validate_username(self, value):
+        RegistrationService.ensure_registration_open()
+        if User.objects.filter(username=value).exists():
+            raise ValidationError(_("Данный логин уже занят, попробуйте другой."))
+        return value
+
     def validate_email(self, value):
+        RegistrationService.ensure_registration_open()
         normalized = (value or '').strip().lower()
         error = RegistrationService.validate_email_for_registration(normalized)
         if error:
@@ -119,7 +133,7 @@ class UserRegistrationSerializer(ModelSerializer):
 
 
 class UserLoginSerializer(Serializer):
-    username = CharField(max_length=150)
+    username = CharField(max_length=254)
     password = CharField(write_only=True)
 
 

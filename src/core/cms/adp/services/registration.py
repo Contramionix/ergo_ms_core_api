@@ -18,7 +18,9 @@ from django.db.models import Q
 from django.utils import timezone
 
 from src.core.cms.adp.models import RegistrationInvitation
-from src.core.utils.methods import send_registration_invitation_email
+from src.core.cms.adp.services.registration_invitation_mail import (
+    send_registration_invitation_email,
+)
 
 
 class RegistrationService:
@@ -36,6 +38,32 @@ class RegistrationService:
     @staticmethod
     def is_registration_enabled() -> bool:
         return RegistrationService.get_mode() != RegistrationService.MODE_CLOSED
+
+    @staticmethod
+    def registration_disabled_message() -> str:
+        return _('Регистрация в системе отключена.')
+
+    @staticmethod
+    def reject_if_registration_closed():
+        """HTTP 403 Response, если регистрация закрыта; иначе None."""
+        if RegistrationService.is_registration_enabled():
+            return None
+        from rest_framework import status
+        from rest_framework.response import Response
+
+        return Response(
+            {'message': RegistrationService.registration_disabled_message()},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    @staticmethod
+    def ensure_registration_open() -> None:
+        """Для сериализаторов: ValidationError до проверок username/email."""
+        if RegistrationService.is_registration_enabled():
+            return
+        from rest_framework.serializers import ValidationError
+
+        raise ValidationError(RegistrationService.registration_disabled_message())
 
     @staticmethod
     def requires_invitation() -> bool:
@@ -58,7 +86,7 @@ class RegistrationService:
     @staticmethod
     def build_invitation_url(token: str) -> str:
         base_url = getattr(settings, 'FRONTEND_BASE_URL', 'http://localhost:8001').rstrip('/')
-        return f'{base_url}/register?invite={token}'
+        return f'{base_url}/register#invite={token}'
 
     @staticmethod
     def generate_token() -> str:

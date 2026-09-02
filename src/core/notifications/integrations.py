@@ -5,7 +5,7 @@
 """
 
 from src.core.integrations import bridge
-from src.core.integrations.module_contracts import NOTIFICATIONS_CREATE
+from src.core.integrations.module_contracts import NOTIFICATIONS_CREATE, NOTIFICATIONS_RECALL
 
 from .services import NotificationService
 
@@ -59,4 +59,20 @@ def _create_notification(
         meta=meta,
         actions=actions,
         idempotency_key=idempotency_key,
+    )
+
+
+@bridge.provide_op(NOTIFICATIONS_RECALL)
+def _recall_notification(*, idempotency_key=None, idempotency_keys=None, **_):
+    """Отозвать неактуальные уведомления по idempotency_key.
+
+    Параметры:
+        idempotency_key (str|None): один ключ.
+        idempotency_keys (iterable[str]|None): несколько ключей.
+
+    Возвращает число отозванных записей.
+    """
+    return NotificationService.recall(
+        idempotency_key=idempotency_key,
+        idempotency_keys=idempotency_keys,
     )

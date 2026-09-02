@@ -72,10 +72,20 @@ def get_catalog() -> dict:
 
 
 def get_action_spec(source_module: str, action: str) -> dict | None:
-    section = get_catalog().get(source_module or '')
-    if not section:
+    """Спека действия; при отсутствии в модуле — поиск по всем секциям (undo.*)."""
+    action_key = action or ''
+    if not action_key:
         return None
-    return section['actions'].get(action or '')
+    section = get_catalog().get(source_module or '')
+    if section:
+        spec = section['actions'].get(action_key)
+        if spec:
+            return spec
+    for other in get_catalog().values():
+        spec = other['actions'].get(action_key)
+        if spec:
+            return spec
+    return None
 
 
 def find_action_spec(source_module: str, action: str) -> dict | None:

@@ -5,11 +5,26 @@
 такие как секретный ключ, режим отладки и разрешенные хосты.
 """
 
+import sys
+
+from django.core.exceptions import ImproperlyConfigured
+
 from src.config.patterns.local import *
 from src.config.env import env
 from src.config.nginx_runtime import merge_allowed_hosts, nginx_enabled, nginx_use_https
+from src.config.paths import DEPLOYMENT_DIR
 
 SECRET_KEY = env.str('API_SECRET_KEY')
+
+# К3: production не стартует с пустым/шаблонным/коротким секретом.
+if str(DEPLOYMENT_DIR) not in sys.path:
+    sys.path.insert(0, str(DEPLOYMENT_DIR))
+from security.secret_validation import validate_production_secret_key  # noqa: E402
+
+try:
+    validate_production_secret_key(SECRET_KEY)
+except ValueError as exc:
+    raise ImproperlyConfigured(str(exc)) from exc
 
 DEBUG = False
 

@@ -20,3 +20,21 @@ class CMSPage(models.Model):
         choices=PAGE_TYPE_CHOICES,
         default=PAGE_TYPE_WITHOUT_LIMITATIONS,
     )
+
+
+class ApiEndpoint(models.Model):
+    """Каталог HTTP API path для picker политик policy_type=api."""
+
+    path = models.CharField(max_length=500, unique=True)
+    name = models.CharField(max_length=255, blank=True, default='')
+    module_name = models.CharField(max_length=100, blank=True, default='core')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'API-эндпоинт'
+        verbose_name_plural = 'API-эндпоинты'
+        ordering = ['path']
+
+    def __str__(self):
+        return self.path

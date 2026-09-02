@@ -322,20 +322,18 @@ def populate_core_menu(apps, schema_editor):
         order=10,
         is_admin_only=True,
     )
-    users_menu = cms.create_group(
+    cms.create_group(
         'Пользователи',
         'UsersPanel',
         icon='Users',
         parent=admin_panel,
         order=10,
     )
-    cms.create_routes_batch([
-        ('В сети', 'OnlineUsersPanel'),
-    ], parent=users_menu)
+    # OnlineUsersPanel не создаём: отдельной страницы нет, «В сети» — фильтр на UsersPanel.
     cms.create_routes_batch([
         ('Роли', 'CategoriesPanel'),
         ('Ролевые группы', 'GroupsPanel'),
-        ('Политики и права', 'PermissionsPanel'),
+        ('Управление доступом', 'PermissionsPanel'),
         ('Ограничения', 'LiminationPanel'),
         ('Управление меню', 'MenuPanel'),
     ], parent=admin_panel)
@@ -405,77 +403,26 @@ def remove_theme_editor_menu(apps, schema_editor):
     ).delete()
 
 
-def add_neural_networks_hub_menu(apps, schema_editor):
-    """Создаёт ролевые группы, элементы меню и привязывает пункты к ролям."""
-    from src.core.cms.adp.menu.migration_utils import MenuMigrationHelper
+def add_legacy_seeded_module_menu(apps, schema_editor):
+    """
+    Исторический seed меню внешнего модуля ошибочно жил в ядре.
 
-    Role = apps.get_model('cms_adp', 'Role')
-    RoleGroup = apps.get_model('cms_adp', 'RoleGroup')
-    MenuItem = apps.get_model('cms_adp', 'MenuItem')
-
-    # Ролевые группы под ролью «Пользователь» (для фильтрации меню)
-    role_user = Role.objects.filter(name='Пользователь').first()
-    if not role_user:
-        return
-    teacher_group, _ = RoleGroup.objects.get_or_create(
-        name=ROLE_GROUP_TEACHER,
-        parent_role=role_user,
-        defaults={'description': 'Преподаватель в модуле нейронных сетей', 'is_active': True},
-    )
-    student_group, _ = RoleGroup.objects.get_or_create(
-        name=ROLE_GROUP_STUDENT,
-        parent_role=role_user,
-        defaults={'description': 'Студент в модуле нейронных сетей', 'is_active': True},
-    )
-
-    helper = MenuMigrationHelper(apps, 'modules/neural_networks_hub')
-    helper.clear_module_items()
-
-    root = helper.create_group(
-        'Модуль нейронных сетей', 'NeuralNetworksHub', icon='Brain'
-    )
-
-    # Видят все (до выбора роли): только выбор роли
-    helper.create_route('Выбор роли', 'NNHubRoleSelect', parent=root, icon='UserPlus')
-
-    # Курсы видны только после выбора роли (преподаватель или студент)
-    r_courses = helper.create_route('Курсы', 'NNHubCourseList', parent=root)
-    r_courses.allowed_role_groups.add(teacher_group)
-    r_courses.allowed_role_groups.add(student_group)
-
-    # Только преподаватель (allowed_role_groups задаём после создания)
-    r_teacher = helper.create_route('Рабочее место', 'NNHubTeacher', parent=root, icon='GraduationCap')
-    r_groups = helper.create_route('Учебные группы', 'NNHubGroups', parent=root)
-    r_teacher.allowed_role_groups.add(teacher_group)
-    r_groups.allowed_role_groups.add(teacher_group)
-
-    # Только студент
-    r_student = helper.create_route('Рабочее место', 'NNHubStudent', parent=root, icon='User')
-    r_my = helper.create_route('Мои курсы', 'NNHubMyEnrollments', parent=root)
-    r_student.allowed_role_groups.add(student_group)
-    r_my.allowed_role_groups.add(student_group)
-
-    # Мониторинг RAG — только преподаватель
-    eval_group = helper.create_group(
-        'Мониторинг RAG', 'NNHubEvalDashboard', icon='BarChart2', parent=root
-    )
-    eval_group.allowed_role_groups.add(teacher_group)
-    r_eval_dash = helper.create_route('Дашборд', 'NNHubEvalDashboard', parent=eval_group)
-    r_eval_ds = helper.create_route('Эталонные датасеты', 'NNHubEvalDatasets', parent=eval_group)
-    r_eval_exp = helper.create_route('Эксперименты', 'NNHubExperiments', parent=eval_group)
-    for item in (r_eval_dash, r_eval_ds, r_eval_exp):
-        item.allowed_role_groups.add(teacher_group)
+    Seed модуля должен жить только в миграциях самого модуля. Тело — noop:
+    иначе restore_menu снова создаёт пункты (парный remove он пропускает).
+    """
+    return
 
 
-def remove_neural_networks_hub_menu(apps, schema_editor):
-    """Удаляет элементы меню и ролевые группы модуля neural_networks_hub."""
+def remove_legacy_seeded_module_menu(apps, schema_editor):
+    """Удаляет элементы меню и ролевые группы, ошибочно засеянные из ядра."""
     MenuItem = apps.get_model('cms_adp', 'MenuItem')
     RoleGroup = apps.get_model('cms_adp', 'RoleGroup')
+    # Исторический module_source в БД — литерал менять нельзя.
     MenuItem.objects.filter(module_source='modules/neural_networks_hub').delete()
     RoleGroup.objects.filter(name__in=[ROLE_GROUP_TEACHER, ROLE_GROUP_STUDENT]).delete()
 
 
-def remove_nn_hub_menu(apps, schema_editor):
+def remove_legacy_seeded_module_menu_alias(apps, schema_editor):
     MenuItem = apps.get_model('cms_adp', 'MenuItem')
     RoleGroup = apps.get_model('cms_adp', 'RoleGroup')
     MenuItem.objects.filter(module_source='modules/neural_networks_hub').delete()
@@ -494,12 +441,13 @@ def reverse_shortcodes_module_source(apps, schema_editor):
     MenuItem.objects.filter(module_source='cms_shortcodes').update(module_source='core/shortcodes')
 
 
-def update_bi_module_source(apps, schema_editor):
+def update_ex_core_module_source(apps, schema_editor):
     MenuItem = apps.get_model('cms_adp', 'MenuItem')
+    # Исторический module_source при выносе из ядра — литерал менять нельзя.
     MenuItem.objects.filter(module_source='core/bi').update(module_source='modules/bi_analysis')
 
 
-def reverse_bi_module_source(apps, schema_editor):
+def reverse_ex_core_module_source(apps, schema_editor):
     MenuItem = apps.get_model('cms_adp', 'MenuItem')
     MenuItem.objects.filter(module_source='modules/bi_analysis').update(module_source='core/bi')
 
@@ -601,7 +549,7 @@ def restructure_site_settings_menu(apps, schema_editor):
 def _ensure_admin_panel_children(cms, MenuItem, admin_panel):
     users_menu = MenuItem.objects.filter(route_name='UsersPanel', parent=admin_panel).first()
     if not users_menu:
-        users_menu = cms.create_group(
+        cms.create_group(
             'Пользователи',
             'UsersPanel',
             icon='Users',
@@ -610,13 +558,13 @@ def _ensure_admin_panel_children(cms, MenuItem, admin_panel):
             is_admin_only=True,
         )
 
-    if not MenuItem.objects.filter(parent=users_menu, route_name='OnlineUsersPanel').exists():
-        cms.create_route('В сети', 'OnlineUsersPanel', parent=users_menu, is_admin_only=True)
+    # Устаревший seed: маршрута OnlineUsersPanel на клиенте нет.
+    MenuItem.objects.filter(route_name='OnlineUsersPanel').delete()
 
     admin_routes = [
         ('Роли', 'CategoriesPanel'),
         ('Ролевые группы', 'GroupsPanel'),
-        ('Политики и права', 'PermissionsPanel'),
+        ('Управление доступом', 'PermissionsPanel'),
         ('Ограничения', 'LiminationPanel'),
         ('Управление меню', 'MenuPanel'),
     ]
@@ -783,13 +731,13 @@ def consolidate_access_menu(apps, schema_editor):
     if permissions_item is not None:
         preserved_order = permissions_item.order
         preserved_parent = permissions_item.parent
-        permissions_item.name = 'Доступ и права'
+        permissions_item.name = 'Управление доступом'
         permissions_item.route_name = NEW_ROUTE_NAME
         permissions_item.save(update_fields=['name', 'route_name'])
     elif limitations_item is not None:
         preserved_order = limitations_item.order
         preserved_parent = limitations_item.parent
-        limitations_item.name = 'Доступ и права'
+        limitations_item.name = 'Управление доступом'
         limitations_item.route_name = NEW_ROUTE_NAME
         limitations_item.save(update_fields=['name', 'route_name'])
 
@@ -808,7 +756,7 @@ def consolidate_access_menu(apps, schema_editor):
         )['order__max'] or 0
 
         MenuItem.objects.create(
-            name='Доступ и права',
+            name='Управление доступом',
             route_name=NEW_ROUTE_NAME,
             icon='Shield',
             item_type='route',
@@ -827,7 +775,7 @@ def restore_access_menu(apps, schema_editor):
     if access_item is None:
         return
 
-    access_item.name = 'Политики и права'
+    access_item.name = 'Управление доступом'
     access_item.route_name = 'PermissionsPanel'
     access_item.save(update_fields=['name', 'route_name'])
 
@@ -1220,11 +1168,11 @@ class Migration(migrations.Migration):
             reverse_code=remove_theme_editor_menu,
         ),
         migrations.RunPython(
-            code=add_neural_networks_hub_menu,
-            reverse_code=remove_neural_networks_hub_menu,
+            code=add_legacy_seeded_module_menu,
+            reverse_code=remove_legacy_seeded_module_menu,
         ),
         migrations.RunPython(
-            code=remove_nn_hub_menu,
+            code=remove_legacy_seeded_module_menu_alias,
             reverse_code=django.db.migrations.operations.special.RunPython.noop,
         ),
         migrations.RunPython(
@@ -1232,8 +1180,8 @@ class Migration(migrations.Migration):
             reverse_code=reverse_shortcodes_module_source,
         ),
         migrations.RunPython(
-            code=update_bi_module_source,
-            reverse_code=reverse_bi_module_source,
+            code=update_ex_core_module_source,
+            reverse_code=reverse_ex_core_module_source,
         ),
         migrations.RunPython(
             code=remove_filemanager_menu,

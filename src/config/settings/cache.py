@@ -14,12 +14,12 @@ from src.config.redis_runtime import (
     effective_cache_backend,
     redis_connection_options,
 )
-from src.config.settings.base import VIRTUAL_ENV_DIR
+from src.config.paths import CACHE_DIR
 
 CACHE_BACKEND = effective_cache_backend()
 CACHE_DEFAULT_TIMEOUT = env.int('API_CACHE_DEFAULT_TIMEOUT', default=300)
 
-_django_cache_dir = VIRTUAL_ENV_DIR / 'cache' / 'django'
+_django_cache_dir = CACHE_DIR / 'django'
 
 if CACHE_BACKEND == 'redis':
     _redis_url = cache_redis_url()

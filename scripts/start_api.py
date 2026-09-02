@@ -6,13 +6,15 @@
 """
 
 import os
-import subprocess
 import sys
 from pathlib import Path
+
+from _replace_process import replace_current_process
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 API_DIR = SCRIPT_DIR.parent
 PROJECT_ROOT = API_DIR.parent.parent
+DEPLOYMENT_DIR = PROJECT_ROOT / 'core' / 'deployment'
 
 
 def _ensure_sys_path() -> None:
@@ -20,6 +22,15 @@ def _ensure_sys_path() -> None:
         entry = str(path)
         if entry not in sys.path:
             sys.path.insert(0, entry)
+    deployment = str(DEPLOYMENT_DIR)
+    if deployment not in sys.path:
+        sys.path.insert(0, deployment)
+
+
+def _ensure_api_secret() -> None:
+    from security.ensure_secret import ensure_mode_secrets_for_process
+
+    ensure_mode_secrets_for_process(PROJECT_ROOT)
 
 
 def _build_env() -> dict:
@@ -35,6 +46,7 @@ def _build_env() -> dict:
 
 def main() -> int:
     _ensure_sys_path()
+    _ensure_api_secret()
 
     from src.config.deploy import (
         build_dev_command,
@@ -59,12 +71,12 @@ def main() -> int:
 
     if is_production():
         cmd = build_daphne_command(sys.executable)
-        print(f'API (запуск как на сервере): daphne на {host}:{port}')
+        print(f'API (запуск как на сервере): daphne на {host}, порт {port}')
     else:
         cmd = build_dev_command(sys.executable)
-        print(f'API (разработка): runserver на {host}:{port}')
+        print(f'API (разработка): runserver на {host}, порт {port}')
 
-    return subprocess.call(cmd, cwd=str(API_DIR), env=run_env)
+    return replace_current_process(cmd, cwd=str(API_DIR), env=run_env)
 
 
 if __name__ == '__main__':

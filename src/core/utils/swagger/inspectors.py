@@ -1,4 +1,4 @@
-from drf_yasg.inspectors import ReferencingSerializerInspector
+from drf_spectacular.openapi import AutoSchema
 
 
 def _module_ref_prefix(module: str) -> str:
@@ -19,13 +19,10 @@ def _module_ref_prefix(module: str) -> str:
     )
 
 
-class UniqueRefNameSerializerInspector(ReferencingSerializerInspector):
-    """
-    Генерирует уникальные ref_name для сериализаторов с одинаковым именем класса
-    в разных модулях (например одноимённый Serializer в двух разных модулях).
-    """
+class UniqueRefNameAutoSchema(AutoSchema):
+    """Уникальные имена компонентов схемы для одноимённых сериализаторов в разных модулях."""
 
-    def get_serializer_ref_name(self, serializer):
+    def get_component_name(self, serializer, *args, **kwargs):
         meta = getattr(serializer, 'Meta', None)
         if meta is not None and hasattr(meta, 'ref_name'):
             return meta.ref_name

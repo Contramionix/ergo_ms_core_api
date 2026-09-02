@@ -15,6 +15,7 @@ from src.config.nginx_runtime import (
     nginx_use_https,
 )
 from src.config.paths import (
+    CACHE_DIR,
     ENV_FILE_PATH,
     MODULES_DIR,
     SYSTEM_DIR,
@@ -84,6 +85,10 @@ MEDIA_API_PORT = int(effective_media_public_port('8003'))
 MEDIA_API_PROTOCOL = 'https' if nginx_use_https() else os.getenv('MEDIA_API_PROTOCOL', 'http')
 MEDIA_URL_EXPIRATION = int(os.getenv('MEDIA_URL_EXPIRATION', '3600'))
 MEDIA_UPLOAD_MAX_SIZE = int(os.getenv('MEDIA_UPLOAD_MAX_SIZE', '524288000'))
+# Абсолютный потолок: модуль может запросить выше MEDIA_UPLOAD_MAX_SIZE, но не выше hard.
+MEDIA_UPLOAD_HARD_MAX_SIZE = int(os.getenv('MEDIA_UPLOAD_HARD_MAX_SIZE', str(5 * 1024 * 1024 * 1024)))
+if MEDIA_UPLOAD_HARD_MAX_SIZE < MEDIA_UPLOAD_MAX_SIZE:
+    MEDIA_UPLOAD_HARD_MAX_SIZE = MEDIA_UPLOAD_MAX_SIZE
 MEDIA_UPLOAD_TOKEN_EXPIRATION = int(os.getenv('MEDIA_UPLOAD_TOKEN_EXPIRATION', '300'))
 
 # Режим доступа core/api к файлам: ERGO_MEDIA (или явный MEDIA_ACCESS_MODE)
@@ -92,6 +97,6 @@ MEDIA_API_INTERNAL_KEY = os.getenv('MEDIA_API_INTERNAL_KEY', '').strip()
 
 # Compute-пайплайн (см. core/utils/media_client/pipeline.py, scratch.py)
 # Scratch — эфемерные файлы обработки (никогда в БД и не в signed URL)
-MEDIA_SCRATCH_ROOT = os.getenv('MEDIA_SCRATCH_ROOT', '').strip() or str(VIRTUAL_ENV_DIR / 'cache' / 'scratch')
+MEDIA_SCRATCH_ROOT = os.getenv('MEDIA_SCRATCH_ROOT', '').strip() or str(CACHE_DIR / 'scratch')
 # Cache — локальные копии canonical-файлов при MEDIA_ACCESS_MODE=remote (localize)
-MEDIA_CACHE_ROOT = os.getenv('MEDIA_CACHE_ROOT', '').strip() or str(VIRTUAL_ENV_DIR / 'cache' / 'media')
+MEDIA_CACHE_ROOT = os.getenv('MEDIA_CACHE_ROOT', '').strip() or str(CACHE_DIR / 'media')

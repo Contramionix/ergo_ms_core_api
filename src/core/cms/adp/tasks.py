@@ -26,6 +26,15 @@ MAX_LOGS_IN_META = 1000
 PROGRESS_UPDATE_EVERY_ROWS = 10
 
 
+@shared_task(name='core.cms.adp.purge_old_devices')
+def purge_old_user_devices_task() -> int:
+    """Периодическое удаление UserDevice по API_SESSION_DEVICE_RETENTION_DAYS."""
+    from src.core.cms.adp.services.device_retention import purge_old_user_devices
+
+    return purge_old_user_devices()
+
+
+
 def _import_meta(current, total, created, skipped, progress, accumulated_logs, last_log, initiated_by_user_id=None):
     logs = accumulated_logs[-MAX_LOGS_IN_META:].copy()
     meta = {

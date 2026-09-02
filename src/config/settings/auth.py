@@ -17,13 +17,44 @@ from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
 from src.config.env import env
+from src.config.security_profile_runtime import (
+    auth_lockout_max_attempts,
+    jwt_lifetime_enabled,
+    login_throttle_rate,
+    remember_me_refresh_token_lifetime,
+)
 from src.config.settings.drf import DRF_BROWSABLE_ENABLED
 
 AUTH_USER_MODEL = 'cms_adp.ErgoUser'
 
+AUTHENTICATION_BACKENDS = [
+    'src.core.cms.adp.backends.EmailOrUsernameModelBackend',
+]
+
 # Настройка ограничения запросов для анонимных и аутентифицированных пользователей.
-THROTTLE_RATES_ANON = env.str('API_THROTTLE_RATES_ANON', default='10/minute')
+# Anon должен выдерживать F5/boot публичных эндпоинтов; login — отдельный scope 5/min.
+THROTTLE_RATES_ANON = env.str('API_THROTTLE_RATES_ANON', default='60/minute')
 THROTTLE_RATES_USER = env.str('API_THROTTLE_RATES_USER', default='5000/hour')
+# Login throttle: unset → профиль ERGO_SECURITY (standard: 5/minute)
+THROTTLE_RATES_LOGIN = login_throttle_rate()
+THROTTLE_RATES_PASSWORD_RESET = env.str(
+    'API_THROTTLE_RATES_PASSWORD_RESET',
+    default='5/minute',
+)
+THROTTLE_RATES_REGISTRATION = env.str(
+    'API_THROTTLE_RATES_REGISTRATION',
+    default='5/minute',
+)
+# Восстановление сессии по cookie (F5): отдельный бакет, не общий anon.
+THROTTLE_RATES_TOKEN_REFRESH = env.str(
+    'API_THROTTLE_RATES_TOKEN_REFRESH',
+    default='60/minute',
+)
+
+# Блокировка после N неудачных логинов (0 = выкл). Unset → профиль (hardened 10 / maximum 5).
+API_AUTH_LOCKOUT_MAX_ATTEMPTS = auth_lockout_max_attempts()
+API_AUTH_LOCKOUT_WINDOW_SECONDS = env.int('API_AUTH_LOCKOUT_WINDOW_SECONDS', default=900)
+API_AUTH_LOCKOUT_DURATION_SECONDS = env.int('API_AUTH_LOCKOUT_DURATION_SECONDS', default=900)
 
 DEFAULT_RENDERER_CLASSES = [
     'rest_framework.renderers.JSONRenderer',
@@ -40,6 +71,7 @@ REST_FRAMEWORK = {
         'rest_framework.permissions.IsAuthenticated',
     ],
     'DEFAULT_RENDERER_CLASSES': DEFAULT_RENDERER_CLASSES,
+    'EXCEPTION_HANDLER': 'src.core.utils.exception_handler.api_exception_handler',
     'DEFAULT_THROTTLE_CLASSES': [
         'rest_framework.throttling.AnonRateThrottle',
         'rest_framework.throttling.UserRateThrottle',
@@ -47,14 +79,23 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_RATES': {
         'anon': THROTTLE_RATES_ANON,
         'user': THROTTLE_RATES_USER,
-        'password_reset': '5/minute',
-        'login': '5/minute',
+        'password_reset': THROTTLE_RATES_PASSWORD_RESET,
+        'registration': THROTTLE_RATES_REGISTRATION,
+        'login': THROTTLE_RATES_LOGIN,
+        'token_refresh': THROTTLE_RATES_TOKEN_REFRESH,
     },
+    'DEFAULT_SCHEMA_CLASS': 'src.core.utils.swagger.inspectors.UniqueRefNameAutoSchema',
 }
 
-# Установка настроек REST_FRAMEWORK глобально
-if not hasattr(settings, 'REST_FRAMEWORK'):
-    setattr(settings, 'REST_FRAMEWORK', REST_FRAMEWORK)
+# Всегда синхронизируем: иначе после reload view видит новый scope,
+# а django.conf.settings держит старый DEFAULT_THROTTLE_RATES → 500.
+setattr(settings, 'REST_FRAMEWORK', REST_FRAMEWORK)
+try:
+    from rest_framework.settings import api_settings as _drf_api_settings
+
+    _drf_api_settings.reload()
+except Exception:
+    pass
 
 # Настройка время жизни токенов доступа и обновления (стандартные).
 ACCESS_TOKEN_LIFETIME = env.int('API_ACCESS_TOKEN_LIFETIME', default=30)
@@ -63,7 +104,7 @@ REFRESH_TOKEN_LIFETIME = env.int('API_REFRESH_TOKEN_LIFETIME', default=1440)
 # Настройка времени жизни токенов для режима "Запомнить меня" (в минутах).
 # По умолчанию: 3 дня для access, 7 дней для refresh
 REMEMBER_ME_ACCESS_TOKEN_LIFETIME = env.int('API_REMEMBER_ME_ACCESS_TOKEN_LIFETIME', default=4320)
-REMEMBER_ME_REFRESH_TOKEN_LIFETIME = env.int('API_REMEMBER_ME_REFRESH_TOKEN_LIFETIME', default=10080)
+REMEMBER_ME_REFRESH_TOKEN_LIFETIME = remember_me_refresh_token_lifetime()
 
 # Тип развертывания (используется в других частях API, не влияет на JWT)
 from src.config.deploy import get_deploy_type, is_development
@@ -71,11 +112,15 @@ from src.config.deploy import get_deploy_type, is_development
 DEPLOY_TYPE = get_deploy_type()
 IS_DEVELOPMENT = is_development()
 
+# Overlay прав глобального админа (глазик). В production всегда выключен.
+DEV_TOOLS_ENABLED = bool(env.bool('ERGO_DEV_TOOLS', default=False) and IS_DEVELOPMENT)
+
 # Ограничение срока жизни JWT (true/false, не зависит от API_DEPLOY_TYPE).
 # true  — используются API_ACCESS_TOKEN_LIFETIME и API_REFRESH_TOKEN_LIFETIME
 # false — срок жизни не ограничивается (значения lifetime игнорируются);
 #         только для development / open-профиля — в production запрещено.
-JWT_LIFETIME_ENABLED = env.bool('API_JWT_LIFETIME_ENABLED', default=True)
+# Unset: standard+ → true из профиля; open — не форсится (дефолт кода True).
+JWT_LIFETIME_ENABLED = jwt_lifetime_enabled()
 
 if not JWT_LIFETIME_ENABLED and not IS_DEVELOPMENT:
     raise ImproperlyConfigured(

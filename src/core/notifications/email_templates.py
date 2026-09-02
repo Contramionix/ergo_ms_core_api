@@ -29,6 +29,11 @@ from src.core.integrations.module_contracts import (
 )
 
 from . import catalog
+from .frontend_route_url import (
+    build_frontend_url_from_route,
+    inbox_url,
+    join_frontend_path,
+)
 
 logger = logging.getLogger('core.notifications')
 
@@ -48,15 +53,22 @@ class RenderedEmail:
 
 
 def _resolve_action_url(notification) -> str:
-    if notification.link_url:
-        return notification.link_url
+    """Ссылка в письме: link_url → Vue-route → инбокс (без числового pk)."""
     base = getattr(settings, 'FRONTEND_BASE_URL', '') or ''
-    route = notification.route or {}
-    route_name = route.get('name') if isinstance(route, dict) else None
-    if base and route_name:
-        # Клиент строит точный путь сам; deep-link ведёт в инбокс уведомлений
-        return f"{base.rstrip('/')}/user/notifications?open={notification.pk}"
-    return base
+    link = (getattr(notification, 'link_url', None) or '').strip()
+    if link:
+        if link.lower().startswith(('http://', 'https://')):
+            return link
+        return join_frontend_path(base, link)
+    routed = build_frontend_url_from_route(getattr(notification, 'route', None), base_url=base)
+    if routed:
+        return routed
+    return inbox_url(base) if base else ''
+
+
+def resolve_unsubscribe_url() -> str:
+    base = getattr(settings, 'FRONTEND_BASE_URL', '') or ''
+    return inbox_url(base) if base else ''
 
 
 def build_base_email_context(notification) -> dict:
@@ -80,6 +92,7 @@ def build_base_email_context(notification) -> dict:
         'event_key': notification.event_key,
         'module_label': module_label,
         'action_url': _resolve_action_url(notification),
+        'unsubscribe_url': resolve_unsubscribe_url(),
         'meta': notification.meta or {},
     }
 

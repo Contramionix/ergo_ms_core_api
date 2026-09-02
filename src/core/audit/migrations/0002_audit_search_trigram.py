@@ -1,6 +1,10 @@
 from django.contrib.postgres.indexes import GinIndex
-from django.contrib.postgres.operations import TrigramExtension
 from django.db import migrations
+
+from src.core.utils.database.pg_trgm import (
+    ensure_pg_trgm_backward,
+    ensure_pg_trgm_forward,
+)
 
 
 class Migration(migrations.Migration):
@@ -10,7 +14,7 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        TrigramExtension(),
+        migrations.RunPython(ensure_pg_trgm_forward, ensure_pg_trgm_backward),
         migrations.AddIndex(
             model_name='auditevent',
             index=GinIndex(

@@ -20,6 +20,148 @@ from django.db.models import Max
 
 from .catalog_keys import build_item_catalog_key, build_separator_catalog_key
 
+# Совпадает с разделителем «Модули» в populate_core_menu (before_order=20).
+CORE_MODULES_SECTION_ORDER = 20
+CORE_MODULES_SEPARATOR_NAME = 'Модули'
+
+
+def _set_root_item_order(MenuItem, MenuLayoutPlacement, item, order: int) -> bool:
+    if item.order == order:
+        return False
+    item.order = order
+    item.save(update_fields=['order'])
+    if MenuLayoutPlacement is not None and getattr(item, 'catalog_key', None):
+        MenuLayoutPlacement.objects.filter(catalog_key=item.catalog_key).update(order=order)
+    return True
+
+
+def reanchor_modules_section_separator(apps=None) -> bool:
+    """
+    Якорь разделителя «Модули» — первый корневой пункт секции (order >= 20).
+    Иначе при одинаковом order разделитель может встать после части модулей.
+    """
+    if apps is None:
+        from django.apps import apps as django_apps
+        apps = django_apps
+
+    MenuItem = apps.get_model('cms_adp', 'MenuItem')
+    MenuSeparator = apps.get_model('cms_adp', 'MenuSeparator')
+    try:
+        MenuSeparatorLayout = apps.get_model('cms_adp', 'MenuSeparatorLayout')
+    except LookupError:
+        MenuSeparatorLayout = None
+
+    first = (
+        MenuItem.objects.filter(
+            parent__isnull=True,
+            is_active=True,
+            order__gte=CORE_MODULES_SECTION_ORDER,
+        )
+        .order_by('order', 'name')
+        .first()
+    )
+    if first is None or not getattr(first, 'catalog_key', None):
+        return False
+
+    sep = (
+        MenuSeparator.objects.filter(name=CORE_MODULES_SEPARATOR_NAME)
+        .order_by('pk')
+        .first()
+    )
+    if sep is None:
+        return False
+
+    changed = (
+        sep.before_catalog_key != first.catalog_key
+        or sep.before_order != CORE_MODULES_SECTION_ORDER
+    )
+    sep.before_catalog_key = first.catalog_key
+    sep.before_order = CORE_MODULES_SECTION_ORDER
+    if changed:
+        sep.save(update_fields=['before_catalog_key', 'before_order'])
+
+    if MenuSeparatorLayout is not None and getattr(sep, 'catalog_key', None):
+        MenuSeparatorLayout.objects.filter(catalog_key=sep.catalog_key).update(
+            before_catalog_key=first.catalog_key,
+            before_order=CORE_MODULES_SECTION_ORDER,
+        )
+    return True
+
+
+def ensure_modules_section_layout(apps=None) -> int:
+    """
+    Выравнивает корневые пункты modules/* в секцию «Модули»:
+    уникальные order 20, 30, 40… и якорь разделителя на первый пункт.
+    """
+    if apps is None:
+        from django.apps import apps as django_apps
+        apps = django_apps
+
+    MenuItem = apps.get_model('cms_adp', 'MenuItem')
+    try:
+        MenuLayoutPlacement = apps.get_model('cms_adp', 'MenuLayoutPlacement')
+    except LookupError:
+        MenuLayoutPlacement = None
+
+    roots = list(
+        MenuItem.objects.filter(
+            parent__isnull=True,
+            module_source__startswith='modules/',
+        )
+        .exclude(catalog_key__isnull=True)
+        .exclude(catalog_key='')
+        .order_by('order', 'name', 'pk')
+    )
+    updated = 0
+    next_order = CORE_MODULES_SECTION_ORDER
+    for item in roots:
+        if _set_root_item_order(MenuItem, MenuLayoutPlacement, item, next_order):
+            updated += 1
+        next_order += MenuMigrationHelper.ORDER_STEP
+
+    reanchor_modules_section_separator(apps)
+    return updated
+
+
+def align_module_root_menu_orders(apps, module_source: str) -> int:
+    """
+    Сдвигает корневые пункты модуля в секцию «Модули» и выравнивает всю секцию.
+    """
+    MenuItem = apps.get_model('cms_adp', 'MenuItem')
+    try:
+        MenuLayoutPlacement = apps.get_model('cms_adp', 'MenuLayoutPlacement')
+    except LookupError:
+        MenuLayoutPlacement = None
+
+    roots = list(
+        MenuItem.objects.filter(
+            module_source=module_source,
+            parent__isnull=True,
+        )
+        .exclude(catalog_key__isnull=True)
+        .exclude(catalog_key='')
+        .order_by('order', 'pk')
+    )
+    if not roots:
+        return 0
+
+    # Сначала подтянуть «провалившиеся» пункты, затем перенумеровать всю секцию.
+    max_order = MenuItem.objects.filter(
+        parent__isnull=True,
+        order__gte=CORE_MODULES_SECTION_ORDER,
+    ).aggregate(Max('order'))['order__max']
+    next_order = max(max_order or 0, CORE_MODULES_SECTION_ORDER - MenuMigrationHelper.ORDER_STEP)
+
+    updated = 0
+    for item in roots:
+        if (item.order or 0) < CORE_MODULES_SECTION_ORDER:
+            next_order += MenuMigrationHelper.ORDER_STEP
+            if _set_root_item_order(MenuItem, MenuLayoutPlacement, item, next_order):
+                updated += 1
+
+    updated += ensure_modules_section_layout(apps)
+    return updated
+
 
 class MenuMigrationHelper:
     """
@@ -60,10 +202,42 @@ class MenuMigrationHelper:
             return False
 
     def _get_next_order(self, parent=None) -> int:
+        if self._is_module_root(parent):
+            return self._get_next_order_in_modules_section()
         max_order = self.MenuItem.objects.filter(
             parent=parent
         ).aggregate(Max('order'))['order__max']
         return (max_order or 0) + self.ORDER_STEP
+
+    def _is_module_root(self, parent) -> bool:
+        return parent is None and self.module_source.startswith('modules/')
+
+    def _get_next_order_in_modules_section(self) -> int:
+        max_order = self.MenuItem.objects.filter(
+            parent__isnull=True,
+            order__gte=CORE_MODULES_SECTION_ORDER,
+        ).aggregate(Max('order'))['order__max']
+        if max_order is None:
+            return CORE_MODULES_SECTION_ORDER
+        return max_order + self.ORDER_STEP
+
+    def _normalize_modules_section_order(
+        self,
+        order: int | None,
+        parent,
+        catalog_key: str | None = None,
+    ) -> int | None:
+        if not self._is_module_root(parent):
+            return order
+        if order is None or order < CORE_MODULES_SECTION_ORDER:
+            return self._get_next_order_in_modules_section()
+
+        conflict = self.MenuItem.objects.filter(parent__isnull=True, order=order)
+        if catalog_key:
+            conflict = conflict.exclude(catalog_key=catalog_key)
+        if conflict.exists():
+            return self._get_next_order_in_modules_section()
+        return order
 
     def _parent_catalog_key(self, parent) -> str | None:
         if parent is None:
@@ -105,6 +279,15 @@ class MenuMigrationHelper:
                 parent = self.MenuItem.objects.filter(
                     catalog_key=existing.parent_catalog_key
                 ).first()
+            # Для корня modules/* seed_order уже нормализован (секция «Модули») —
+            # не откатываем его старым placement.order.
+            if (
+                self._is_module_root(seed_parent)
+                and seed_order is not None
+                and existing.order != seed_order
+            ):
+                existing.order = seed_order
+                existing.save(update_fields=['order'])
             item.parent = parent
             item.order = existing.order
             item.is_active = existing.is_active
@@ -187,11 +370,19 @@ class MenuMigrationHelper:
                     catalog_key=placement.parent_catalog_key
                 ).first()
             effective_parent = parent_obj
-            effective_order = placement.order
+            effective_order = self._normalize_modules_section_order(
+                placement.order, parent, catalog_key=catalog_key,
+            )
+            if effective_order != placement.order:
+                placement.order = effective_order
+                placement.save(update_fields=['order'])
             effective_active = placement.is_active
         else:
             effective_parent = parent
-            effective_order = order if order is not None else self._get_next_order(parent)
+            raw_order = order if order is not None else self._get_next_order(parent)
+            effective_order = self._normalize_modules_section_order(
+                raw_order, parent, catalog_key=catalog_key,
+            )
             effective_active = is_active
 
         fields = dict(

@@ -4,8 +4,7 @@ Views для управления ролями, политиками и прав
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
-from drf_yasg.utils import swagger_auto_schema
-from drf_yasg import openapi
+from src.core.utils.swagger.yasg_compat import swagger_auto_schema, openapi
 
 from django.contrib.auth import get_user_model
 from django.utils.translation import gettext as _
@@ -23,8 +22,42 @@ from src.core.cms.adp.serializers import (
     UserPermissionsSerializer,
 )
 from src.core.cms.adp.services.permissions import PermissionService, RoleAssignmentError
+from src.core.cms.adp.services.permissions_snapshot_cache import (
+    invalidate_all_permissions_snapshots,
+    invalidate_policy_access_caches,
+)
 from src.core.audit.shortcuts import audit_log
 from src.core.utils.methods import parse_errors_to_dict
+from src.core.search.mixins import parse_search_pagination
+from src.core.search.service import search_queryset
+
+
+def _wants_paginated_list(request) -> bool:
+    params = getattr(request, 'query_params', None) or getattr(request, 'GET', {})
+    return any(params.get(key) not in (None, '') for key in ('q', 'search', 'page', 'page_size'))
+
+
+def _paginated_search_list(request, queryset, index_uid, serializer_class, *, default_page_size=50):
+    page, page_size, search = parse_search_pagination(
+        request,
+        default_page_size=default_page_size,
+        max_page_size=200,
+    )
+    queryset, search_result = search_queryset(
+        index_uid,
+        search,
+        queryset,
+        page=page,
+        page_size=page_size,
+    )
+    items = list(queryset)
+    serializer = serializer_class(items, many=True)
+    return Response({
+        'items': serializer.data,
+        'total': search_result.total,
+        'page': page,
+        'page_size': page_size,
+    })
 
 
 class RoleListView(BaseAPIViewGlobalAdminMixin, BaseAPIView):
@@ -39,7 +72,10 @@ class RoleListView(BaseAPIViewGlobalAdminMixin, BaseAPIView):
     )
     def get(self, request):
         """Получить список всех ролей"""
-        roles = Role.objects.all()
+        roles = Role.objects.all().order_by('name')
+        if _wants_paginated_list(request):
+            from src.core.search.core_indexes import INDEX_ROLES
+            return _paginated_search_list(request, roles, INDEX_ROLES, RoleSerializer)
         serializer = RoleSerializer(roles, many=True)
         return Response(serializer.data)
     
@@ -157,7 +193,16 @@ class RoleGroupListView(BaseAPIViewGlobalAdminMixin, BaseAPIView):
     def get(self, request):
         """Получить список всех ролевых групп"""
         minimal = request.query_params.get('minimal') in ('1', 'true', 'yes')
-        groups = RoleGroup.objects.select_related('parent_role').all()
+        groups = RoleGroup.objects.select_related('parent_role').all().order_by('name')
+        if _wants_paginated_list(request):
+            from src.core.search.core_indexes import INDEX_ROLE_GROUPS
+            serializer_class = RoleGroupMinimalSerializer if minimal else RoleGroupSerializer
+            return _paginated_search_list(
+                request,
+                groups,
+                INDEX_ROLE_GROUPS,
+                serializer_class,
+            )
         serializer_class = RoleGroupMinimalSerializer if minimal else RoleGroupSerializer
         serializer = serializer_class(groups, many=True)
         return Response(serializer.data)
@@ -271,6 +316,7 @@ class PolicyListView(BaseAPIViewGlobalAdminMixin, BaseAPIView):
         serializer = PolicySerializer(data=request.data)
         if serializer.is_valid():
             policy = serializer.save()
+            invalidate_policy_access_caches()
             audit_log('policy.created', request=request, severity='security',
                    entity={'type': 'policy', 'label': str(policy)})
             return Response(serializer.data, status=status.HTTP_201_CREATED)
@@ -320,6 +366,7 @@ class PolicyDetailView(BaseAPIViewGlobalAdminMixin, BaseAPIView):
         serializer = PolicySerializer(policy, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()
+            invalidate_policy_access_caches()
             audit_log('policy.updated', request=request, severity='security',
                    entity={'type': 'policy', 'label': str(policy)})
             return Response(serializer.data)
@@ -339,6 +386,7 @@ class PolicyDetailView(BaseAPIViewGlobalAdminMixin, BaseAPIView):
         
         policy_label = str(policy)
         policy.delete()
+        invalidate_policy_access_caches()
         audit_log('policy.deleted', request=request, severity='security',
                entity={'type': 'policy', 'label': policy_label})
         return Response(status=status.HTTP_204_NO_CONTENT)
@@ -512,12 +560,22 @@ class ModulePermissionListView(BaseAPIViewGlobalAdminMixin, BaseAPIView):
     def get(self, request):
         """Получить список прав модулей"""
         role_group_id = request.query_params.get('role_group_id')
-        
+
         if role_group_id:
             permissions = ModulePermission.objects.filter(role_group_id=role_group_id)
         else:
             permissions = ModulePermission.objects.all()
-        
+        permissions = permissions.select_related('role_group').order_by('module_name', 'permission_key')
+
+        if _wants_paginated_list(request):
+            from src.core.search.core_indexes import INDEX_MODULE_PERMISSIONS
+            return _paginated_search_list(
+                request,
+                permissions,
+                INDEX_MODULE_PERMISSIONS,
+                ModulePermissionSerializer,
+            )
+
         serializer = ModulePermissionSerializer(permissions, many=True)
         return Response(serializer.data)
     
@@ -542,12 +600,14 @@ class ModulePermissionListView(BaseAPIViewGlobalAdminMixin, BaseAPIView):
                 serializer = ModulePermissionSerializer(existing, data=request.data, partial=True)
                 if serializer.is_valid():
                     serializer.save()
+                    invalidate_all_permissions_snapshots()
                     audit_log('module_permission.updated', request=request, severity='security',
                            entity={'type': 'module_permission', 'label': str(existing)})
                     return Response(serializer.data)
             else:
                 # Создаем новое
                 perm = serializer.save()
+                invalidate_all_permissions_snapshots()
                 audit_log('module_permission.created', request=request, severity='security',
                        entity={'type': 'module_permission', 'label': str(perm)})
                 return Response(serializer.data, status=status.HTTP_201_CREATED)
@@ -598,6 +658,7 @@ class ModulePermissionDetailView(BaseAPIViewGlobalAdminMixin, BaseAPIView):
         serializer = ModulePermissionSerializer(permission, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()
+            invalidate_all_permissions_snapshots()
             audit_log('module_permission.updated', request=request, severity='security',
                    entity={'type': 'module_permission', 'label': str(permission)})
             return Response(serializer.data)
@@ -617,6 +678,7 @@ class ModulePermissionDetailView(BaseAPIViewGlobalAdminMixin, BaseAPIView):
         
         permission_label = str(permission)
         permission.delete()
+        invalidate_all_permissions_snapshots()
         audit_log('module_permission.deleted', request=request, severity='security',
                entity={'type': 'module_permission', 'label': permission_label})
         return Response(status=status.HTTP_204_NO_CONTENT)

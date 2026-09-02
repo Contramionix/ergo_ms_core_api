@@ -7,9 +7,11 @@ import logging
 from django.conf import settings
 from django.core.cache import cache
 
+from src.core.cms.adp.menu.access import MenuAccessChecker
 from src.core.cms.adp.menu.models import MenuSeparator
 from src.core.cms.adp.menu.serializers import MenuSeparatorSerializer
 from src.core.cms.adp.menu.user_menu_builder import build_user_menu_items
+from src.core.cms.adp.middleware.permission_request_cache import get_request_permission_cache
 from src.core.cms.adp.services.permissions import PermissionService
 
 logger = logging.getLogger('core.cms.adp.menu')
@@ -51,25 +53,38 @@ def _role_groups_key(user_role) -> str:
 
 def _menu_cache_key(user, organization_id=None) -> str:
     version = get_menu_cache_version()
-    is_admin = 1 if PermissionService.is_admin(user) else 0
-    user_role = PermissionService.get_user_role(user)
-    role_id = user_role.role_id if user_role else 'none'
-    groups_key = _role_groups_key(user_role)
+    req_cache = get_request_permission_cache()
+    frag_key = f'menu_key_frag:{user.pk}'
+    if frag_key in req_cache:
+        role_id, groups_key, is_admin = req_cache[frag_key]
+    else:
+        user_role = PermissionService.get_user_role(user)
+        is_admin = 1 if PermissionService.is_admin(user) else 0
+        role_id = user_role.role_id if user_role else 'none'
+        groups_key = _role_groups_key(user_role)
+        req_cache[frag_key] = (role_id, groups_key, is_admin)
     org_part = f'o{organization_id}' if organization_id is not None else 'o0'
     return (
         f'menu:v{version}:u{user.pk}:r{role_id}:g{groups_key}:a{is_admin}:{org_part}'
     )
 
 
-def get_active_menu_separators() -> list[dict]:
-    separators = MenuSeparator.objects.filter(is_active=True).order_by('before_order')
+def get_active_menu_separators(user=None, organization_id=None) -> list[dict]:
+    separators = (
+        MenuSeparator.objects.filter(is_active=True)
+        .prefetch_related('allowed_roles', 'allowed_role_groups')
+        .order_by('before_order')
+    )
+    if user is not None:
+        checker = MenuAccessChecker(user, organization_id=organization_id)
+        separators = [sep for sep in separators if checker.can_see_separator(sep)]
     return MenuSeparatorSerializer(separators, many=True).data
 
 
 def _build_user_menu_payload(user, organization_id=None) -> dict:
     return {
         'menu_items': build_user_menu_items(user, organization_id=organization_id),
-        'separators': get_active_menu_separators(),
+        'separators': get_active_menu_separators(user, organization_id=organization_id),
     }
 
 

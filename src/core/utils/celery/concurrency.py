@@ -13,6 +13,43 @@ from django.core.cache import cache
 logger = logging.getLogger('celery.concurrency')
 
 
+class _SlotGate:
+    """Счётчик слотов: смену лимита можно делать без сброса уже взятых."""
+
+    def __init__(self, limit: int):
+        self._lock = threading.Lock()
+        self._cv = threading.Condition(self._lock)
+        self.limit = max(0, int(limit))
+        self.held = 0
+
+    def acquire(self, blocking: bool = False) -> bool:
+        with self._cv:
+            if self.limit <= 0:
+                return False
+            if self.held < self.limit:
+                self.held += 1
+                return True
+            if not blocking:
+                return False
+            while self.held >= self.limit > 0:
+                self._cv.wait()
+            if self.limit <= 0:
+                return False
+            self.held += 1
+            return True
+
+    def release(self) -> None:
+        with self._cv:
+            if self.held > 0:
+                self.held -= 1
+            self._cv.notify_all()
+
+    def set_limit(self, limit: int) -> None:
+        with self._cv:
+            self.limit = max(0, int(limit))
+            self._cv.notify_all()
+
+
 class QueueConcurrencyManager:
     """
     Менеджер для ограничения количества одновременных задач по очередям.
@@ -47,8 +84,12 @@ class QueueConcurrencyManager:
             return
         
         self._queue_limits: Dict[str, int] = {}
-        self._semaphores: Dict[str, threading.Semaphore] = {}
+        self._semaphores: Dict[str, _SlotGate] = {}
         self._semaphore_lock = threading.Lock()
+        self._paused_queues: set[str] = set()
+        self._queue_classes: Dict[str, str] = {}
+        self._non_light_cap = 0
+        self._non_light_gate: Optional[_SlotGate] = None
         self._use_distributed = False  # Использовать распределенные блокировки через cache
         self._cache_ttl = 3600  # TTL для cache-based семафоров (1 час)
         self._retry_delay = 60  # Задержка перед повторной попыткой (секунды)
@@ -87,19 +128,81 @@ class QueueConcurrencyManager:
             max_concurrent: Максимальное количество одновременных задач (0 = без ограничений)
         """
         if max_concurrent <= 0:
-            # Без ограничений - удаляем семафор если был
             self._queue_limits.pop(queue_name, None)
-            self._semaphores.pop(queue_name, None)
+            with self._semaphore_lock:
+                self._semaphores.pop(queue_name, None)
             logger.debug(f"Очередь {queue_name}: без ограничений параллелизма")
             return
-        
+        self.update_queue_limit(queue_name, max_concurrent)
+
+    def update_queue_limit(self, queue_name: str, max_concurrent: int) -> None:
+        """Меняет лимит, не сбрасывая уже взятые слоты."""
+        if max_concurrent <= 0:
+            self.set_queue_limit(queue_name, 0)
+            return
         self._queue_limits[queue_name] = max_concurrent
-        
-        # Создаем или обновляем семафор
         with self._semaphore_lock:
-            self._semaphores[queue_name] = threading.Semaphore(max_concurrent)
-        
+            gate = self._semaphores.get(queue_name)
+            if gate is None:
+                self._semaphores[queue_name] = _SlotGate(max_concurrent)
+            else:
+                gate.set_limit(max_concurrent)
         logger.debug(f"Очередь {queue_name}: max_concurrent_tasks={max_concurrent}")
+
+    def set_paused(self, queue_name: str, paused: bool) -> None:
+        if paused:
+            self._paused_queues.add(queue_name)
+        else:
+            self._paused_queues.discard(queue_name)
+
+    def is_paused(self, queue_name: str) -> bool:
+        return queue_name in self._paused_queues
+
+    def set_queue_classes(self, classes: Dict[str, str]) -> None:
+        self._queue_classes = {
+            str(name): str(task_class).strip().lower()
+            for name, task_class in classes.items()
+            if str(name).strip() and str(task_class).strip()
+        }
+
+    def set_non_light_cap(self, cap: int) -> None:
+        parsed = max(0, int(cap))
+        self._non_light_cap = parsed
+        if parsed <= 0:
+            self._non_light_gate = None
+            return
+        gate = self._non_light_gate
+        if gate is None:
+            self._non_light_gate = _SlotGate(parsed)
+        else:
+            gate.set_limit(parsed)
+
+    def is_light_queue(self, queue_name: str) -> bool:
+        default_class = 'light' if queue_name == 'default' else 'medium'
+        return self._queue_classes.get(queue_name, default_class) == 'light'
+
+    def _needs_non_light_slot(self, queue_name: str) -> bool:
+        return self._non_light_cap > 0 and not self.is_light_queue(queue_name)
+
+    def _acquire_non_light(self, blocking: bool = False) -> bool:
+        if self._non_light_cap <= 0:
+            return True
+        if self._use_distributed:
+            return self._acquire_distributed('__non_light__', blocking)
+        gate = self._non_light_gate
+        if gate is None:
+            return True
+        return gate.acquire(blocking)
+
+    def _release_non_light(self) -> None:
+        if self._non_light_cap <= 0:
+            return
+        if self._use_distributed:
+            self._release_distributed('__non_light__')
+            return
+        gate = self._non_light_gate
+        if gate is not None:
+            gate.release()
     
     def get_queue_limit(self, queue_name: str) -> int:
         """Возвращает лимит для очереди (0 = без ограничений)"""
@@ -120,14 +223,26 @@ class QueueConcurrencyManager:
         Returns:
             True если слот захвачен, False если лимит превышен
         """
+        if self.is_paused(queue_name):
+            return False
+        needs_class = self._needs_non_light_slot(queue_name)
         limit = self._queue_limits.get(queue_name, 0)
+        if not needs_class and limit <= 0:
+            return True
+
+        if needs_class and not self._acquire_non_light(blocking):
+            return False
+
         if limit <= 0:
-            return True  # Без ограничений
-        
+            return True
+
         if self._use_distributed:
-            return self._acquire_distributed(queue_name, blocking)
+            acquired = self._acquire_distributed(queue_name, blocking)
         else:
-            return self._acquire_local(queue_name, blocking)
+            acquired = self._acquire_local(queue_name, blocking)
+        if not acquired and needs_class:
+            self._release_non_light()
+        return acquired
     
     def release(self, queue_name: str):
         """
@@ -136,9 +251,12 @@ class QueueConcurrencyManager:
         Args:
             queue_name: Имя очереди
         """
+        needs_class = self._needs_non_light_slot(queue_name)
         limit = self._queue_limits.get(queue_name, 0)
+        if needs_class:
+            self._release_non_light()
         if limit <= 0:
-            return  # Без ограничений
+            return
         
         if self._use_distributed:
             self._release_distributed(queue_name)
@@ -151,7 +269,7 @@ class QueueConcurrencyManager:
         if semaphore is None:
             return True
         
-        acquired = semaphore.acquire(blocking=blocking)
+        acquired = semaphore.acquire(blocking)
         if acquired:
             logger.debug(f"Очередь {queue_name}: слот захвачен (local)")
         else:
@@ -172,7 +290,10 @@ class QueueConcurrencyManager:
     def _acquire_distributed(self, queue_name: str, blocking: bool = False) -> bool:
         """Распределенный захват через Django cache (требует Redis backend с incr)."""
         cache_key = f'celery:queue_concurrency:{queue_name}'
-        limit = self._queue_limits.get(queue_name, 0)
+        if queue_name == '__non_light__':
+            limit = self._non_light_cap
+        else:
+            limit = self._queue_limits.get(queue_name, 0)
 
         try:
             self._ensure_counter_key(cache_key)
@@ -238,10 +359,7 @@ class QueueConcurrencyManager:
             semaphore = self._semaphores.get(queue_name)
             if semaphore is None:
                 return 0
-            limit = self._queue_limits.get(queue_name, 0)
-            # Semaphore не предоставляет текущее значение напрямую
-            # Возвращаем приблизительное значение
-            return limit - semaphore._value if hasattr(semaphore, '_value') else 0
+            return int(getattr(semaphore, 'held', 0))
     
     def get_all_limits(self) -> Dict[str, int]:
         """Возвращает все настроенные лимиты"""
@@ -249,7 +367,11 @@ class QueueConcurrencyManager:
     
     def has_limit(self, queue_name: str) -> bool:
         """Проверяет, есть ли лимит для очереди"""
-        return queue_name in self._queue_limits and self._queue_limits[queue_name] > 0
+        if self.is_paused(queue_name):
+            return True
+        if queue_name in self._queue_limits and self._queue_limits[queue_name] > 0:
+            return True
+        return self._needs_non_light_slot(queue_name)
 
 
 # Глобальный экземпляр менеджера

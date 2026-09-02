@@ -5,7 +5,7 @@ from django.http import JsonResponse
 from src.core.utils.maintenance import (
     MAINTENANCE_DETAIL,
     is_maintenance_enabled,
-    is_maintenance_status_request,
+    is_maintenance_exempt_request,
 )
 
 
@@ -14,7 +14,7 @@ class MaintenanceMiddleware:
         self.get_response = get_response
 
     def __call__(self, request):
-        if is_maintenance_enabled() and not is_maintenance_status_request(request.path):
+        if is_maintenance_enabled() and not is_maintenance_exempt_request(request.path):
             response = JsonResponse(
                 {'code': 'maintenance', 'detail': MAINTENANCE_DETAIL},
                 status=503,

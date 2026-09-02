@@ -19,6 +19,7 @@ ENV_FILE_PATH = SYSTEM_DIR / '.env'
 ENV_FRAGMENTS_DIR = SYSTEM_DIR / 'env'
 MODULES_DIR = SYSTEM_DIR / 'modules'
 VIRTUAL_ENV_DIR = SYSTEM_DIR / 'virtual_env'
+CACHE_DIR = VIRTUAL_ENV_DIR / 'cache'
 DEPLOYMENT_DIR = REPO_CORE_DIR / 'deployment'
 
 from src.config.log_paths import resolve_logs_root  # noqa: E402

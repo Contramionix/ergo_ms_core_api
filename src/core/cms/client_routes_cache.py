@@ -8,14 +8,18 @@
 import logging
 from pathlib import Path
 
-from src.config.settings.base import DJANGO_CORE_DIR, MODULES_DIR, SYSTEM_DIR, VIRTUAL_ENV_DIR
-from src.core.cms.scripts import discover_client_routes_catalog
+from src.config.paths import CACHE_DIR
+from src.config.settings.base import DJANGO_CORE_DIR, MODULES_DIR, SYSTEM_DIR
+from src.core.cms.scripts import (
+    build_module_url_prefixes,
+    build_route_name_to_path_index,
+    discover_client_routes_catalog,
+)
 from src.core.utils.auto_api.auto_config import ModuleDiscoverer
 from src.core.utils.cache_io import read_bin_cache, write_bin_cache
 
 logger = logging.getLogger('utils')
 
-CACHE_DIR = VIRTUAL_ENV_DIR / 'cache'
 CACHE_FILE = CACHE_DIR / 'client_routes_index.bin'
 
 
@@ -45,6 +49,13 @@ def _get_fingerprint() -> dict:
     else:
         result['core_routes_js'] = 0
 
+    # Версия парсера: смена scripts.py должна инвалидировать кэш
+    scripts_path = SYSTEM_DIR / 'core' / 'api' / 'src' / 'core' / 'cms' / 'scripts.py'
+    try:
+        result['scripts_py'] = scripts_path.stat().st_mtime if scripts_path.exists() else 0
+    except OSError:
+        result['scripts_py'] = 0
+
     for name, path in (('core', DJANGO_CORE_DIR), ('modules', MODULES_DIR)):
         p = Path(path)
         if p.exists():
@@ -70,7 +81,14 @@ def _is_cache_valid(cached: dict) -> bool:
         return False
     data = cached.get('data')
     catalog = cached.get('catalog')
-    return isinstance(data, dict) and isinstance(catalog, dict)
+    by_name = cached.get('by_route_name')
+    prefixes = cached.get('module_prefixes')
+    return (
+        isinstance(data, dict)
+        and isinstance(catalog, dict)
+        and isinstance(by_name, dict)
+        and isinstance(prefixes, dict)
+    )
 
 
 def _build_cache_payload() -> dict:
@@ -83,6 +101,8 @@ def _build_cache_payload() -> dict:
         'fingerprint': _get_fingerprint(),
         'data': data,
         'catalog': catalog,
+        'by_route_name': build_route_name_to_path_index(catalog),
+        'module_prefixes': build_module_url_prefixes(catalog),
     }
 
 
@@ -115,6 +135,38 @@ def get_client_routes_catalog(*, use_cache: bool = True) -> dict[str, dict[str, 
     return {
         path: dict(entry)
         for path, entry in payload['catalog'].items()
+    }
+
+
+def get_client_route_name_index(*, use_cache: bool = True) -> dict[str, str]:
+    """route_name → path для сопоставления пунктов меню с URL-политиками."""
+    if use_cache:
+        cached = read_bin_cache(CACHE_FILE)
+        if _is_cache_valid(cached):
+            return dict(cached['by_route_name'])
+
+    payload = _build_cache_payload()
+    if use_cache:
+        write_bin_cache(CACHE_FILE, payload)
+    return dict(payload['by_route_name'])
+
+
+def get_module_url_prefixes(*, use_cache: bool = True) -> dict[str, list[str]]:
+    """module_name → список URL-префиксов (`/impuls-analysis`)."""
+    if use_cache:
+        cached = read_bin_cache(CACHE_FILE)
+        if _is_cache_valid(cached):
+            return {
+                module_name: list(prefixes)
+                for module_name, prefixes in cached['module_prefixes'].items()
+            }
+
+    payload = _build_cache_payload()
+    if use_cache:
+        write_bin_cache(CACHE_FILE, payload)
+    return {
+        module_name: list(prefixes)
+        for module_name, prefixes in payload['module_prefixes'].items()
     }
 
 

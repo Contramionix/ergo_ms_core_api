@@ -14,8 +14,11 @@ import logging
 from typing import Any
 
 from src.core.integrations.session_context import (
+    bind_request_session_claim_values,
     get_session_claim_descriptors,
     get_session_entity_resolvers,
+    iter_payload_session_claim_names,
+    reset_request_session_claim_values,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,7 +44,9 @@ class SessionContextMiddleware:
         self.get_response = get_response
 
     def __call__(self, request):
-        descriptors = get_session_claim_descriptors()
+        path = getattr(request, 'path', '') or ''
+        local_only = path.startswith('/internal/')
+        descriptors = get_session_claim_descriptors(local_only=local_only)
 
         request._session_entity_cache = {}
         request._session_entity_resolvers = {}
@@ -49,7 +54,8 @@ class SessionContextMiddleware:
         for descriptor in descriptors:
             setattr(request, descriptor['request_attr'], None)
 
-        self._extract_session_claims_from_token(request)
+        applied = self._extract_session_claims_from_token(request, descriptors)
+        ctx_token = bind_request_session_claim_values(applied)
 
         for descriptor in descriptors:
             entity_key = descriptor.get('entity_key')
@@ -62,7 +68,10 @@ class SessionContextMiddleware:
                 )
                 self._ensure_entity_property(type(request), entity_key)
 
-        return self.get_response(request)
+        try:
+            return self.get_response(request)
+        finally:
+            reset_request_session_claim_values(ctx_token)
 
     @staticmethod
     def _access_token_payload(request) -> Any | None:
@@ -85,19 +94,27 @@ class SessionContextMiddleware:
             return None
 
     @staticmethod
-    def _extract_session_claims_from_token(request) -> None:
+    def _extract_session_claims_from_token(request, descriptors: list) -> dict[str, int]:
+        applied: dict[str, int] = {}
         payload = SessionContextMiddleware._access_token_payload(request)
         if payload is None:
-            return
+            return applied
+        attr_by_claim = {
+            descriptor['claim']: descriptor['request_attr']
+            for descriptor in descriptors
+        }
         try:
-            for descriptor in get_session_claim_descriptors():
-                claim = descriptor['claim']
-                request_attr = descriptor['request_attr']
+            for claim in iter_payload_session_claim_names(payload, descriptors):
                 value = payload.get(claim)
-                if value is not None:
-                    setattr(request, request_attr, int(value))
+                if value is None:
+                    continue
+                request_attr = attr_by_claim.get(claim, claim)
+                parsed = int(value)
+                setattr(request, request_attr, parsed)
+                applied[request_attr] = parsed
         except (ValueError, TypeError, AttributeError) as exc:
             logger.warning('Ошибка извлечения session context из токена: %s', exc)
+        return applied
 
     @classmethod
     def _ensure_entity_property(cls, request_cls, entity_key: str) -> None:

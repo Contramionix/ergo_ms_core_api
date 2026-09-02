@@ -2,9 +2,10 @@
 Валидация схем platform-дескрипторов ModuleBridge.
 
 Проверяет объекты, зарегистрированные через ``bridge.provide_many`` /
-``provide_op`` для групп каталога ядра. Битые записи ловятся при
-``django check`` / старте API и в ``ergoms core-rules-check``, а не только
-когда каталог аудита или session-claims молча отбрасывает дескриптор.
+``provide_op`` для групп каталога ядра (локальный реестр процесса,
+без HTTP к peer). Битые записи ловятся при ``django check`` / старте API
+и в ``ergoms core-rules-check``, а не только когда каталог аудита или
+session-claims молча отбрасывает дескриптор.
 
 Режим ``BRIDGE_CONTRACTS``: ``off`` | ``warn`` | ``raise`` (см. settings/bridge.py).
 """
@@ -20,6 +21,11 @@ from src.core.integrations import bridge
 from src.core.integrations.module_contracts import (
     AUDIT_ACTION_DEFINITIONS_GROUP,
     AUDIT_SCOPE_DIMENSIONS_GROUP,
+    CORE_COMPOSE_ADMIN_PASSWORD_RESET,
+    CORE_COMPOSE_IMPORT_WELCOME_DEFAULTS,
+    CORE_COMPOSE_PASSWORD_RESET_CODE,
+    CORE_COMPOSE_REGISTRATION_INVITATION,
+    MEDIA_UPLOAD_QUOTA_POLICIES_GROUP,
     NOTIFICATIONS_EMAIL_CONTEXT_GROUP,
     NOTIFICATIONS_EVENT_DEFINITIONS_GROUP,
     SESSION_CLAIMS_GROUP,
@@ -88,7 +94,7 @@ def _expect_callable(value: Any, path: str, errors: list[str], *, required: bool
 
 
 def _validate_session_claims(errors: list[str]) -> None:
-    for key, raw in bridge.all(SESSION_CLAIMS_GROUP).items():
+    for key, raw in bridge.local_group(SESSION_CLAIMS_GROUP).items():
         path = _path(SESSION_CLAIMS_GROUP, str(key))
         data = _expect_dict(raw, path, errors)
         if data is None:
@@ -121,7 +127,7 @@ def _validate_session_claims(errors: list[str]) -> None:
 
 
 def _validate_audit_actions(errors: list[str]) -> None:
-    for key, raw in bridge.all(AUDIT_ACTION_DEFINITIONS_GROUP).items():
+    for key, raw in bridge.local_group(AUDIT_ACTION_DEFINITIONS_GROUP).items():
         path = _path(AUDIT_ACTION_DEFINITIONS_GROUP, str(key))
         data = _expect_dict(raw, path, errors)
         if data is None:
@@ -177,7 +183,7 @@ def _validate_audit_actions(errors: list[str]) -> None:
 
 def _validate_audit_dimensions(errors: list[str]) -> None:
     seen_keys: dict[str, str] = {}
-    for key, raw in bridge.all(AUDIT_SCOPE_DIMENSIONS_GROUP).items():
+    for key, raw in bridge.local_group(AUDIT_SCOPE_DIMENSIONS_GROUP).items():
         path = _path(AUDIT_SCOPE_DIMENSIONS_GROUP, str(key))
         data = _expect_dict(raw, path, errors)
         if data is None:
@@ -234,7 +240,7 @@ def _validate_notification_channel(raw: Any, path: str, errors: list[str]) -> No
 
 
 def _validate_notification_events(errors: list[str]) -> None:
-    for key, raw in bridge.all(NOTIFICATIONS_EVENT_DEFINITIONS_GROUP).items():
+    for key, raw in bridge.local_group(NOTIFICATIONS_EVENT_DEFINITIONS_GROUP).items():
         path = _path(NOTIFICATIONS_EVENT_DEFINITIONS_GROUP, str(key))
         data = _expect_dict(raw, path, errors)
         if data is None:
@@ -295,21 +301,87 @@ def _validate_notification_events(errors: list[str]) -> None:
 
 
 def _validate_email_context(errors: list[str]) -> None:
-    for key, raw in bridge.all(NOTIFICATIONS_EMAIL_CONTEXT_GROUP).items():
+    for key, raw in bridge.local_group(NOTIFICATIONS_EMAIL_CONTEXT_GROUP).items():
         path = _path(NOTIFICATIONS_EMAIL_CONTEXT_GROUP, str(key))
         _expect_callable(raw, path, errors, required=True)
 
 
-def _validate_session_restore_op(errors: list[str]) -> None:
-    if not bridge.has(SESSION_RESTORE_CLAIMS):
-        return
-    # LocalTransport хранит handler; call с sentinel ненадёжен — проверяем через all ops.
-    handler = _resolve_single_provider(SESSION_RESTORE_CLAIMS)
-    if handler is not None and not callable(handler):
-        errors.append(
-            f'{SESSION_RESTORE_CLAIMS}: провайдер должен быть callable, '
-            f'получено {type(handler).__name__}'
+def _validate_upload_quota_policies(errors: list[str]) -> None:
+    from src.core.utils.media_upload_quota import (
+        RESERVED_QUOTA_CLASSES,
+        is_valid_quota_slug,
+        is_valid_rate_string,
+        normalize_policy_prefix,
+    )
+
+    for key, raw in bridge.local_group(MEDIA_UPLOAD_QUOTA_POLICIES_GROUP).items():
+        path = _path(MEDIA_UPLOAD_QUOTA_POLICIES_GROUP, str(key))
+        data = _expect_dict(raw, path, errors)
+        if data is None:
+            continue
+
+        prefix = _expect_str(
+            data.get('target_dir_prefix'),
+            f'{path}.target_dir_prefix',
+            errors,
         )
+        if prefix and not normalize_policy_prefix(prefix):
+            errors.append(
+                f'{path}.target_dir_prefix={prefix!r}: ожидается относительный POSIX-префикс'
+            )
+
+        infix = data.get('path_must_contain')
+        if infix is not None:
+            _expect_str(
+                infix,
+                f'{path}.path_must_contain',
+                errors,
+                required=False,
+            )
+
+        quota = _expect_str(data.get('quota'), f'{path}.quota', errors)
+        if quota:
+            slug = quota.strip().lower()
+            if slug in RESERVED_QUOTA_CLASSES or not is_valid_quota_slug(slug):
+                errors.append(
+                    f'{path}.quota={quota!r}: slug [a-z0-9_]+, не user/admin'
+                )
+
+        rate = data.get('rate')
+        if rate is None:
+            errors.append(f'{path}.rate: обязательное поле отсутствует')
+        elif callable(rate):
+            pass
+        elif isinstance(rate, str):
+            if not is_valid_rate_string(rate):
+                errors.append(
+                    f'{path}.rate={rate!r}: ожидается N/minute (second|hour|day)'
+                )
+        else:
+            errors.append(
+                f'{path}.rate: ожидается str или callable, получено {type(rate).__name__}'
+            )
+
+        _expect_callable(data.get('allows'), f'{path}.allows', errors, required=True)
+
+
+_OPTIONAL_CALLABLE_OPS = (
+    SESSION_RESTORE_CLAIMS,
+    CORE_COMPOSE_REGISTRATION_INVITATION,
+    CORE_COMPOSE_IMPORT_WELCOME_DEFAULTS,
+    CORE_COMPOSE_PASSWORD_RESET_CODE,
+    CORE_COMPOSE_ADMIN_PASSWORD_RESET,
+)
+
+
+def _validate_optional_callable_ops(errors: list[str]) -> None:
+    # Только локальный реестр: has() по HTTP ретраит недоступный peer при django check.
+    for name in _OPTIONAL_CALLABLE_OPS:
+        handler = _resolve_single_provider(name)
+        if handler is not None and not callable(handler):
+            errors.append(
+                f'{name}: провайдер должен быть callable, получено {type(handler).__name__}'
+            )
 
 
 def _resolve_single_provider(name: str) -> Any | None:
@@ -325,7 +397,8 @@ def collect_contract_violations() -> list[str]:
     _validate_audit_dimensions(errors)
     _validate_notification_events(errors)
     _validate_email_context(errors)
-    _validate_session_restore_op(errors)
+    _validate_upload_quota_policies(errors)
+    _validate_optional_callable_ops(errors)
     return errors
 
 

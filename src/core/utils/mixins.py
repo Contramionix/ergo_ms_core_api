@@ -24,26 +24,41 @@ def read_storage_file_bytes(storage_name: str) -> bytes:
 
 
 class SwaggerSafeMixin:
-    """
-    Миксин для безопасной работы с Swagger генерацией схемы.
-    Предотвращает ошибки при генерации документации API.
-    """
-    
+    """Безопасный user/queryset при генерации схемы Swagger и для гостей."""
+
     def is_swagger_fake_view(self):
-        """Проверяет, является ли текущий запрос фейковым для Swagger"""
         return getattr(self, 'swagger_fake_view', False)
-    
+
     def get_safe_user(self):
-        """Безопасно получает пользователя, учитывая Swagger контекст"""
+        """None при Swagger fake-view и для неаутентифицированного запроса."""
         if self.is_swagger_fake_view():
             return None
-        return self.request.user
-    
+        user = getattr(getattr(self, 'request', None), 'user', None)
+        if user is None or not getattr(user, 'is_authenticated', False):
+            return None
+        return user
+
+    def restrict_queryset(self, queryset):
+        """Пустая выборка для Swagger и гостей. Дальше фильтруй по владельцу/scope."""
+        if self.get_safe_user() is None:
+            return queryset.none()
+        return queryset
+
     def get_safe_queryset(self, base_queryset):
-        """Безопасно фильтрует queryset, учитывая Swagger контекст"""
-        if self.is_swagger_fake_view():
-            return base_queryset.none()
-        return base_queryset
+        return self.restrict_queryset(base_queryset)
+
+
+class SwaggerSafeSerializerMixin:
+    """get_safe_user() из context['request'] — для SerializerMethodField."""
+
+    def get_safe_user(self):
+        request = self.context.get('request') if getattr(self, 'context', None) else None
+        if request is None:
+            return None
+        user = getattr(request, 'user', None)
+        if user is None or not getattr(user, 'is_authenticated', False):
+            return None
+        return user
 
 
 class MediaApiFileMixin:

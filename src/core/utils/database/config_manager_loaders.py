@@ -124,6 +124,10 @@ class DjangoDatabaseConfigLoader(BaseDatabaseConfigLoader):
             conn_max_age = env.int('API_DATABASE_CONN_MAX_AGE', default=60)
             if conn_max_age > 0:
                 django_config['CONN_MAX_AGE'] = conn_max_age
+
+        module_owner = str(db_config.get('module') or '').strip()
+        if module_owner:
+            django_config['MODULE'] = module_owner
         
         return django_config
     

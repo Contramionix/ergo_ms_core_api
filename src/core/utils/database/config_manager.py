@@ -52,6 +52,18 @@ def _get_cached_yaml(config_path: Path) -> Optional[Dict]:
         return None
 
 
+def resolve_databases_yaml_path(system_dir: Path) -> Path:
+    """
+    Путь к databases.yaml.
+
+    ERGO_DATABASES_YAML — абсолютный/относительный путь (loadtest ephemeral API).
+    """
+    override = (os.environ.get('ERGO_DATABASES_YAML') or '').strip()
+    if override:
+        return Path(override)
+    return Path(system_dir) / 'databases.yaml'
+
+
 # ==================== Константы ====================
 
 DB_ENGINES = {
@@ -78,7 +90,7 @@ class BaseDatabaseConfigLoader(ABC):
             system_dir: Путь к корневой директории системы
         """
         self.system_dir = system_dir
-        self.config_path = system_dir / 'databases.yaml'
+        self.config_path = resolve_databases_yaml_path(system_dir)
         self._raw_config: Optional[Dict] = None
         self._loaded = False
     
@@ -362,4 +374,5 @@ __all__ = [
     'DjangoDatabaseConfigLoader',
     'CeleryDatabaseConfigLoader',
     'DB_ENGINES',
+    'resolve_databases_yaml_path',
 ]

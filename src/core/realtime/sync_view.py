@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
-from drf_yasg import openapi
-from drf_yasg.utils import swagger_auto_schema
+from src.core.utils.swagger.yasg_compat import swagger_auto_schema, openapi
 
 from src.core.cms.adp.services import presence as presence_service
 from src.core.notifications.models import Notification
@@ -49,15 +48,15 @@ class RealtimeSyncView(BaseAPIViewAuthMixin, BaseAPIView):
 
         notifications_after_id = request.query_params.get('notifications_after_id')
         notifications = []
+        latest_notification_id = None
+        visible_qs = Notification.objects.filter(recipient=user, in_app_visible=True)
         if notifications_after_id is not None:
             after_id = parse_after_id_value(notifications_after_id)
             if after_id is not None:
-                qs = (
-                    Notification.objects
-                    .filter(recipient=user, in_app_visible=True, id__gt=after_id)
-                    .order_by('id')[:50]
-                )
+                qs = visible_qs.filter(id__gt=after_id).order_by('id')[:50]
                 notifications = NotificationSerializer(qs, many=True).data
+        else:
+            latest_notification_id = visible_qs.order_by('-id').values_list('id', flat=True).first() or 0
 
         presence_ok = None
         if str(request.query_params.get('presence_heartbeat', '')).lower() in ('1', 'true', 'yes'):
@@ -79,6 +78,8 @@ class RealtimeSyncView(BaseAPIViewAuthMixin, BaseAPIView):
             'notifications': notifications,
             'presence': presence_ok,
         }
+        if latest_notification_id is not None:
+            payload['latest_notification_id'] = latest_notification_id
         if admin_presence is not None:
             payload['admin_presence'] = admin_presence
         return Response(payload)

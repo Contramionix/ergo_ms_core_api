@@ -52,7 +52,9 @@ class ModuleDiscoverer:
         disabled = get_disabled_modules()
         result: Dict[str, str] = {}
 
-        # 1. Внешние модули (modules/<module_name>/client/js/routes.js)
+        # 1. Внешние модули:
+        #    - modules/<module_name>/client/js/routes.js
+        #    - modules/<module_name>/client/<section>/js/routes.js (вложенные подприложения)
         # Клиентский discovery — все non-disabled (не фильтр HTTP-процесса).
         if MODULES_DIR.exists() and MODULES_DIR.is_dir():
             for module_dir in MODULES_DIR.iterdir():
@@ -63,8 +65,18 @@ class ModuleDiscoverer:
 
                 routes_path = module_dir / 'client' / 'js' / 'routes.js'
                 if routes_path.exists():
-                    key = f'module:{module_dir.name}'
-                    result[key] = str(routes_path)
+                    result[f'module:{module_dir.name}'] = str(routes_path)
+
+                nested_root = module_dir / 'client'
+                if nested_root.is_dir():
+                    for nested_dir in nested_root.iterdir():
+                        if not nested_dir.is_dir() or nested_dir.name == 'js':
+                            continue
+                        nested_routes = nested_dir / 'js' / 'routes.js'
+                        if nested_routes.exists():
+                            result[f'module:{module_dir.name}:{nested_dir.name}'] = str(
+                                nested_routes
+                            )
 
         # 2. Внутренние модули ядра (core/client/src/core/<module_name>/js/routes.js)
         core_client_root = SYSTEM_DIR / 'core' / 'client' / 'src' / 'core'
@@ -215,6 +227,13 @@ class ModuleDiscoverer:
             return
         
         for module_name in os.listdir(current_dir):
+            if module_name.startswith('.') or module_name in (
+                '__pycache__',
+                'migrations',
+                'node_modules',
+                'dist',
+            ):
+                continue
             module_path = os.path.join(current_dir, module_name)
             
             if os.path.isdir(module_path):

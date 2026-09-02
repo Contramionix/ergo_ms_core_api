@@ -222,6 +222,11 @@ def materialize_all_layouts() -> dict:
         for item in MenuItem.objects.all()
     }
     seps_n = apply_all_separator_layouts(key_to_item)
+
+    # Корневые modules/* → секция «Модули» (уникальный order + якорь разделителя).
+    from .migration_utils import ensure_modules_section_layout
+
+    ensure_modules_section_layout()
     return {'items': items_n, 'separators': seps_n}
 
 

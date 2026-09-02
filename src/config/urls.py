@@ -2,26 +2,38 @@
 Файл для определения маршрутов URL для Django-API-приложения.
 
 Он использует функцию `path` из `django.urls` для определения маршрутов и функцию `include`
-для включения URL-конфигураций из других модулей. Автоматическое обнаружение URL-конфигураций
-ядра и модулей выполняется через класс `ModuleDiscoverer`.
+для включения URL-конфигураций из других модулей. Список маршрутов ядра и модулей
+берётся из файлового кэша (как discovered_apps); include() остаётся ленивым.
 """
 
-from src.core.utils.auto_api.auto_config import ModuleDiscoverer
-from src.config.settings.base import DJANGO_CORE_DIR, MODULES_DIR, BASE_DIR
-from src.core.utils.path_utils import convert_path_to_dot_notation
+from django.urls import include, path
+
+from src.core.utils.auto_api.discovered_urls_cache import (
+    get_discovered_url_entries,
+    iter_top_level_module_prefixes,
+)
+from src.core.utils.media_views import MediaUploadTokenView
+from src.core.utils.module_registry import is_slim_module_process
 
 urlpatterns = []
+if not is_slim_module_process():
+    from src.core.system.jupyter_gate import JupyterAccessView
 
-discoverer = ModuleDiscoverer()
+    urlpatterns.append(
+        path('internal/jupyter-access/', JupyterAccessView.as_view(), name='jupyter-access'),
+    )
 
-# Добавляем URL-конфигурации ядра, автоматически обнаруженные в DJANGO_CORE_DIR
-core_relative_path = DJANGO_CORE_DIR.relative_to(BASE_DIR.parent)
-core_prefix = convert_path_to_dot_notation(core_relative_path)
-core_urlpatterns: list = []
-discoverer._recursively_find_urls(str(DJANGO_CORE_DIR), core_prefix, "", core_urlpatterns)
-urlpatterns += core_urlpatterns
+discovered = get_discovered_url_entries()
+for route, dotted_module in discovered:
+    urlpatterns.append(path(route, include(dotted_module)))
 
-# Добавляем URL-конфигурации модулей, автоматически обнаруженные в директории MODULES_DIR
-modules_urlpatterns: list = []
-discoverer._find_modules_urls(str(MODULES_DIR), modules_urlpatterns)
-urlpatterns += modules_urlpatterns
+# Токен загрузки на процессе модуля: nginx /api/<name>/ остаётся на этом хосте,
+# upload_url и HMAC берутся из местного media_api, а не с ядра.
+for module_name in iter_top_level_module_prefixes(discovered):
+    urlpatterns.append(
+        path(
+            f'{module_name}/media/upload-token/',
+            MediaUploadTokenView.as_view(),
+            name=f'{module_name}-media-upload-token',
+        )
+    )

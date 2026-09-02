@@ -75,7 +75,7 @@ class Command(RunserverCommand):
         if is_production():
             host = get_api_bind_host()
             port = get_api_bind_port()
-            msg = f'{SERVICE_NAME} (запуск как на сервере): daphne на {host}:{port} (без autoreload)'
+            msg = f'{SERVICE_NAME} (запуск как на сервере): daphne на {host}, порт {port} (без autoreload)'
             logger.info(msg)
             try:
                 self.stdout.write(self.style.SUCCESS(msg))

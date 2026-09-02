@@ -1,6 +1,7 @@
 from datetime import timedelta
 
-from django.db.models import Q
+from django.db.models import Q, TextField
+from django.db.models.functions import Cast
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from rest_framework import permissions, viewsets
@@ -9,13 +10,18 @@ from rest_framework.pagination import LimitOffsetPagination
 from rest_framework.response import Response
 
 from src.core.utils.mixins import SwaggerSafeMixin
+from src.core.utils.permissions import ObjectPermissionMixin
 
 from src.core.realtime.envelope import build_envelope
 from src.core.realtime.polling import apply_after_id
 from src.core.realtime.topics import notifications_user_topic
 
 from .models import Notification
-from .preferences import PreferencePanelService
+from .preferences import (
+    PreferencePanelService,
+    get_auto_archive_days,
+    get_sidebar_activity_days,
+)
 from .serializers import NotificationSerializer
 from .services import NotificationService
 
@@ -25,7 +31,7 @@ class NotificationPagination(LimitOffsetPagination):
     max_limit = 100
 
 
-class NotificationViewSet(SwaggerSafeMixin, viewsets.ReadOnlyModelViewSet):
+class NotificationViewSet(ObjectPermissionMixin, SwaggerSafeMixin, viewsets.ReadOnlyModelViewSet):
     """Инбокс уведомлений текущего пользователя.
 
     Список + действия:
@@ -64,12 +70,20 @@ class NotificationViewSet(SwaggerSafeMixin, viewsets.ReadOnlyModelViewSet):
         if source_module:
             qs = qs.filter(source_module=source_module)
 
+        q = (self.request.query_params.get('q') or '').strip()
+        if q:
+            # meta — JSON (ФИО, названия проектов и т.п.); Cast даёт поиск по всем строковым значениям
+            qs = qs.annotate(_meta_text=Cast('meta', TextField())).filter(
+                Q(title__icontains=q)
+                | Q(body__icontains=q)
+                | Q(_meta_text__icontains=q)
+            )
+
         if self.request.query_params.get('inbox') == 'sidebar':
-            week_ago = timezone.now() - timedelta(days=7)
+            days = get_sidebar_activity_days(self.request.user)
+            cutoff = timezone.now() - timedelta(days=days)
             qs = qs.filter(sidebar_hidden_at__isnull=True).filter(
-                Q(is_read=False)
-                | Q(is_read=True, read_at__gte=week_ago)
-                | Q(is_read=True, read_at__isnull=True, created_at__gte=week_ago)
+                Q(is_read=False) | Q(is_read=True, created_at__gte=cutoff)
             )
 
         created_after = self.request.query_params.get('created_after')
@@ -83,6 +97,9 @@ class NotificationViewSet(SwaggerSafeMixin, viewsets.ReadOnlyModelViewSet):
         qs = apply_after_id(qs, self.request)
 
         return qs
+
+    def check_object_permission(self, request, obj):
+        return getattr(obj, 'recipient_id', None) == getattr(request.user, 'pk', None)
 
     def _serialize(self, notification):
         return NotificationSerializer(notification).data
@@ -172,16 +189,6 @@ class NotificationViewSet(SwaggerSafeMixin, viewsets.ReadOnlyModelViewSet):
             'unread_count': NotificationService.unread_count(request.user),
         })
 
-    @action(detail=True, methods=['post', 'delete'], url_path='delete')
-    def soft_delete(self, request, pk=None):
-        ok = NotificationService.soft_delete(pk, request.user)
-        if not ok:
-            return Response({'success': False}, status=404)
-        return Response({
-            'success': True,
-            'unread_count': NotificationService.unread_count(request.user),
-        })
-
     @action(detail=True, methods=['post'], url_path='execute_action')
     def execute_action(self, request, pk=None):
         action_id = (request.data.get('action_id') or '').strip()
@@ -206,9 +213,10 @@ class NotificationViewSet(SwaggerSafeMixin, viewsets.ReadOnlyModelViewSet):
         """Настройки уведомлений текущего пользователя.
 
         GET — секции каталога (модули/категории/события) с эффективными
-        значениями каналов + глобальные master-switch.
+        значениями каналов + global + sidebar_activity_days + auto_archive_days.
         PATCH — batch-изменения: {'global': {channel: bool}, 'items': [
-            {'source_module', 'event_key', 'channel', 'enabled'}]}.
+            {'source_module', 'event_key', 'channel', 'enabled'}],
+            'sidebar_activity_days': 1..7, 'auto_archive_days': 7|14|30|60|90}.
         """
         if request.method == 'GET':
             return Response(PreferencePanelService.build_sections(request.user))
@@ -219,4 +227,6 @@ class NotificationViewSet(SwaggerSafeMixin, viewsets.ReadOnlyModelViewSet):
             'success': True,
             'updated': updated,
             'global': PreferencePanelService.get_global_switches(request.user.pk),
+            'sidebar_activity_days': get_sidebar_activity_days(request.user),
+            'auto_archive_days': get_auto_archive_days(request.user),
         })

@@ -50,12 +50,25 @@ def invalidate_all_permissions_snapshots() -> None:
     )
 
 
+def invalidate_policy_access_caches() -> None:
+    """Сброс меню и UX-snapshot прав после CRUD Policy."""
+    from src.core.cms.adp.menu.menu_cache import invalidate_user_menu_cache
+
+    invalidate_user_menu_cache()
+    invalidate_all_permissions_snapshots()
+
+
 def get_user_permissions_payload(
     user: User,
     organization_id: int | None = None,
 ) -> dict:
     """Сериализованные права; кэш в Django cache с TTL (ключ включает org)."""
     if user is None or not getattr(user, 'pk', None):
+        return _build_payload(user, organization_id)
+
+    from src.core.cms.adp.dev_tools.preview import get_active_preview
+
+    if get_active_preview() is not None:
         return _build_payload(user, organization_id)
 
     ttl = get_permissions_snapshot_ttl()

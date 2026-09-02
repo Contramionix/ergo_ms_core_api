@@ -122,12 +122,18 @@ class MenuItemTreeSerializer(ModelSerializer):
 class MenuSeparatorSerializer(ModelSerializer):
     """Сериализатор для разделителей меню"""
     id = UUIDField(source='public_id', read_only=True)
+    allowed_roles_data = RoleSerializer(source='allowed_roles', many=True, read_only=True)
+    allowed_role_groups_data = RoleGroupSerializer(
+        source='allowed_role_groups', many=True, read_only=True,
+    )
 
     class Meta:
         model = MenuSeparator
         fields = [
             'id', 'catalog_key', 'module_source', 'name',
-            'before_order', 'before_catalog_key', 'is_active',
+            'before_order', 'before_catalog_key', 'is_active', 'is_admin_only',
+            'allowed_roles', 'allowed_roles_data',
+            'allowed_role_groups', 'allowed_role_groups_data',
             'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'catalog_key', 'created_at', 'updated_at']

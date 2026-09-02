@@ -2,10 +2,9 @@
 API заявок на изменение ФИО пользователя.
 """
 
-from django.db.models import Q
 from django.utils.translation import gettext as _
-from drf_yasg import openapi
-from drf_yasg.utils import swagger_auto_schema
+from src.core.search.mixins import parse_search_pagination
+from src.core.utils.swagger.yasg_compat import swagger_auto_schema, openapi
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -20,20 +19,16 @@ from src.core.cms.adp.services.profile_change_request import ProfileChangeReques
 from src.core.cms.adp.services.profile_settings import ProfileSettingsService
 from src.core.cms.adp.services.admin_access import require_global_admin_response
 from src.core.audit.shortcuts import audit_log
-from src.core.utils.base.base_views import BaseAPIView, BaseAPIViewAuthMixin
+from src.core.utils.base.base_views import BaseAPIView, BaseAPIViewAuthMixin, BaseAPIViewPublicMixin
 
 
 def _parse_pagination(request, default_page_size=12):
-    try:
-        page = max(1, int(request.query_params.get('page', 1)))
-    except (TypeError, ValueError):
-        page = 1
-    try:
-        page_size = min(100, max(1, int(request.query_params.get('page_size', default_page_size))))
-    except (TypeError, ValueError):
-        page_size = default_page_size
+    page, page_size, search = parse_search_pagination(
+        request,
+        default_page_size=default_page_size,
+        max_page_size=100,
+    )
     status_filter = (request.query_params.get('status') or '').strip().lower()
-    search = (request.query_params.get('search') or '').strip()
     return page, page_size, status_filter, search
 
 
@@ -41,7 +36,7 @@ def _serialize_request(request_obj):
     return UserProfileChangeRequestSerializer(request_obj).data
 
 
-class ProfileSettingsView(BaseAPIView):
+class ProfileSettingsView(BaseAPIViewPublicMixin):
     """Публичные настройки редактирования профиля."""
 
     @swagger_auto_schema(
@@ -60,7 +55,7 @@ class UserProfileChangeRequestListCreateView(BaseAPIViewAuthMixin, BaseAPIView):
         responses={200: UserProfileChangeRequestSerializer(many=True)},
     )
     def get(self, request):
-        if not ProfileChangeRequestService.is_request_flow_enabled():
+        if not ProfileChangeRequestService.is_request_flow_enabled(request.user):
             return Response({'requests': [], 'request_flow_enabled': False})
 
         queryset = (
@@ -84,7 +79,7 @@ class UserProfileChangeRequestListCreateView(BaseAPIViewAuthMixin, BaseAPIView):
         },
     )
     def post(self, request):
-        if not ProfileChangeRequestService.is_request_flow_enabled():
+        if not ProfileChangeRequestService.is_request_flow_enabled(request.user):
             return Response(
                 {'error': ProfileChangeRequestService.NOT_ALLOWED_MESSAGE},
                 status=status.HTTP_403_FORBIDDEN,
@@ -141,27 +136,22 @@ class AdminProfileChangeRequestListView(BaseAPIViewAuthMixin, BaseAPIView):
         if status_filter in valid_statuses:
             queryset = queryset.filter(status=status_filter)
 
-        if search:
-            queryset = queryset.filter(
-                Q(user__username__icontains=search)
-                | Q(user__email__icontains=search)
-                | Q(user__first_name__icontains=search)
-                | Q(user__last_name__icontains=search)
-                | Q(user__middle_name__icontains=search)
-                | Q(email__icontains=search)
-                | Q(first_name__icontains=search)
-                | Q(last_name__icontains=search)
-                | Q(middle_name__icontains=search)
-                | Q(phone__icontains=search)
-                | Q(comment__icontains=search)
-            )
+        from src.core.search.core_indexes import INDEX_PROFILE_CHANGE
+        from src.core.search.service import search_queryset
 
-        total = queryset.count()
+        queryset, search_result = search_queryset(
+            INDEX_PROFILE_CHANGE,
+            search,
+            queryset,
+            page=page,
+            page_size=page_size,
+        )
+
+        total = search_result.total
         pending_count = UserProfileChangeRequest.objects.filter(
             status=UserProfileChangeRequest.STATUS_PENDING,
         ).count()
-        start = (page - 1) * page_size
-        items = queryset[start:start + page_size]
+        items = list(queryset)
 
         return Response({
             'requests': [_serialize_request(item) for item in items],

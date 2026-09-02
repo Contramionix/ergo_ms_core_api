@@ -5,36 +5,42 @@
 сохраняется в файл и пересчитывается только при изменении core/ или modules/.
 """
 
-from src.core.utils.auto_api.discovered_apps_cache import get_discovered_apps
+from src.config.deploy import is_development
 from src.config.env import env
+from src.core.utils.auto_api.discovered_apps_cache import get_discovered_apps
+from src.core.utils.module_registry import is_slim_module_process
 
 ALL_MODULES = get_discovered_apps(use_cache=True)
+_SLIM_MODULE = is_slim_module_process()
 
-# Определяем список установленных приложений
 INSTALLED_APPS = ALL_MODULES + [
     'daphne',
-    'channels',
     'django.contrib.auth',
     'django.contrib.contenttypes',
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
 
-    'django_extensions',
-
     'rest_framework',
     'rest_framework_simplejwt.token_blacklist',
     
     'corsheaders',
-    'drf_yasg',
-    'django_celery_beat',
+    'drf_spectacular',
 ]
+
+if not _SLIM_MODULE:
+    INSTALLED_APPS.insert(1, 'channels')
+    INSTALLED_APPS.append('django_celery_beat')
+
+if is_development():
+    INSTALLED_APPS.append('django_extensions')
 
 # CHANNEL_LAYERS — в src.config.settings.channel_layers
 
 # Определяем список middleware
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
+    'src.core.utils.middleware.request_id_middleware.RequestIdMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'src.core.utils.middleware.security_headers_middleware.SecurityHeadersMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -46,6 +52,8 @@ MIDDLEWARE = [
     'src.core.utils.middleware.profile_locale_middleware.ProfileLocaleMiddleware',
     'src.core.utils.middleware.session_context_middleware.SessionContextMiddleware',
     'src.core.cms.adp.middleware.permission_request_cache.PermissionRequestCacheMiddleware',
+    'src.core.cms.adp.dev_tools.middleware.DevToolsPreviewMiddleware',
+    'src.core.cms.adp.middleware.api_access_policy.ApiAccessPolicyMiddleware',
     'src.core.audit.context.AuditContextMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',

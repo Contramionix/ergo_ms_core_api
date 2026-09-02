@@ -107,13 +107,39 @@ class PolicySerializer(ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at']
 
     def validate(self, attrs):
-        role = attrs.get('role')
-        role_group = attrs.get('role_group')
+        role = attrs.get('role', getattr(self.instance, 'role', None))
+        role_group = attrs.get('role_group', getattr(self.instance, 'role_group', None))
 
         if not role and not role_group:
             raise ValidationError(_('Политика должна быть привязана к роли или ролевой группе'))
         if role and role_group:
             raise ValidationError(_('Политика не может быть одновременно привязана к роли и ролевой группе'))
+
+        policy_type = attrs.get(
+            'policy_type',
+            getattr(self.instance, 'policy_type', None) or 'url',
+        )
+        resource_path = attrs.get(
+            'resource_path',
+            getattr(self.instance, 'resource_path', None) or '',
+        )
+        path = (resource_path or '').strip()
+        if path:
+            is_api_path = path == '/api' or path.startswith('/api/') or path.startswith('/api*')
+            if policy_type == 'api' and not is_api_path:
+                raise ValidationError({
+                    'resource_path': _(
+                        'Для типа «API» путь должен начинаться с /api/ '
+                        '(например /api/cms/adp/policies/ или /api/**).'
+                    ),
+                })
+            if policy_type == 'url' and is_api_path:
+                raise ValidationError({
+                    'resource_path': _(
+                        'Для типа «URL» нельзя указывать API-пути (/api/…). '
+                        'Используйте тип политики «API».'
+                    ),
+                })
 
         return attrs
 
@@ -150,6 +176,28 @@ class ModulePermissionSerializer(ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at']
 
 
+class SnapshotModulePermissionSerializer(Serializer):
+    """Снимок права: ORM ModulePermission или синтетический объект без группы."""
+    id = IntegerField(read_only=True, allow_null=True, required=False)
+    module_name = CharField(read_only=True)
+    permission_key = CharField(read_only=True)
+    permission_name = CharField(read_only=True, allow_blank=True, allow_null=True)
+    description = CharField(read_only=True, allow_blank=True, allow_null=True, required=False)
+    role_group = IntegerField(source='role_group_id', read_only=True, allow_null=True, required=False)
+    role_group_name = SerializerMethodField()
+    is_granted = BooleanField(read_only=True)
+    granted_via = SerializerMethodField()
+    created_at = DateTimeField(read_only=True, allow_null=True, required=False)
+    updated_at = DateTimeField(read_only=True, allow_null=True, required=False)
+
+    def get_role_group_name(self, obj):
+        group = getattr(obj, 'role_group', None)
+        return getattr(group, 'name', None) if group is not None else None
+
+    def get_granted_via(self, obj):
+        return getattr(obj, 'granted_via', None) or 'group'
+
+
 class UserPermissionsSerializer(Serializer):
     """Сериализатор для получения всех прав пользователя"""
     user_id = CharField(read_only=True)
@@ -158,8 +206,10 @@ class UserPermissionsSerializer(Serializer):
     role_groups = RoleGroupSerializer(many=True, read_only=True)
     allowed_urls = ListField(child=CharField(), read_only=True)
     denied_urls = ListField(child=CharField(), read_only=True)
+    denied_api = ListField(child=CharField(), read_only=True)
+    default_view_grants = CharField(read_only=True)
     is_global_admin = BooleanField(read_only=True, default=False)
-    module_permissions = ModulePermissionSerializer(many=True, read_only=True)
+    module_permissions = SnapshotModulePermissionSerializer(many=True, read_only=True)
 
 
 class AdminUserRoleInfoSerializer(Serializer):

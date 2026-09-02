@@ -43,7 +43,13 @@ def delete_admin_user(user: User) -> None:
     )
     revoke_user_auth(user)
 
-    bridge.emit(CORE_USER_DELETE, user=user)
+    public_id = getattr(user, 'public_id', None)
+    bridge.emit(
+        CORE_USER_DELETE,
+        user_id=user.pk,
+        user_public_id=str(public_id) if public_id else '',
+        username=user.username or '',
+    )
 
     _cleanup_core_user_relations(user)
     _delete_user_record(user)

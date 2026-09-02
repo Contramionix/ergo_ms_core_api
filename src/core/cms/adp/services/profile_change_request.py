@@ -29,8 +29,12 @@ class ProfileChangeRequestService:
     INVALID_PHONE_MESSAGE = _lazy('Некорректный формат телефона.')
 
     @staticmethod
-    def is_request_flow_enabled() -> bool:
-        return not ProfileSettingsService.is_self_fio_edit_enabled()
+    def is_request_flow_enabled(user=None) -> bool:
+        if ProfileSettingsService.is_self_fio_edit_enabled():
+            return False
+        if user is None:
+            return True
+        return not ProfileSettingsService.can_user_edit_fio(user)
 
     @staticmethod
     def normalize_name_part(value) -> str:
@@ -139,7 +143,7 @@ class ProfileChangeRequestService:
         phone: str = '',
         comment: str = '',
     ):
-        if not ProfileChangeRequestService.is_request_flow_enabled():
+        if not ProfileChangeRequestService.is_request_flow_enabled(user):
             raise ValueError(ProfileChangeRequestService.NOT_ALLOWED_MESSAGE)
 
         normalized_email = ProfileChangeRequestService.validate_requested_email(

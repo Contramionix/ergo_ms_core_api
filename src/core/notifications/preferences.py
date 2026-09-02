@@ -13,11 +13,82 @@ import logging
 from src.core.integrations import bridge
 
 from . import catalog
-from .models import NotificationPreference
+from .models import NotificationPreference, NotificationUserSettings
 
 logger = logging.getLogger('core.notifications')
 
 GLOBAL_KEY = NotificationPreference.GLOBAL_KEY
+
+SIDEBAR_ACTIVITY_DAYS_MIN = NotificationUserSettings.SIDEBAR_ACTIVITY_DAYS_MIN
+SIDEBAR_ACTIVITY_DAYS_MAX = NotificationUserSettings.SIDEBAR_ACTIVITY_DAYS_MAX
+SIDEBAR_ACTIVITY_DAYS_DEFAULT = NotificationUserSettings.SIDEBAR_ACTIVITY_DAYS_DEFAULT
+
+AUTO_ARCHIVE_DAYS_PRESETS = NotificationUserSettings.AUTO_ARCHIVE_DAYS_PRESETS
+AUTO_ARCHIVE_DAYS_DEFAULT = NotificationUserSettings.AUTO_ARCHIVE_DAYS_DEFAULT
+
+
+def clamp_sidebar_activity_days(value) -> int:
+    try:
+        days = int(value)
+    except (TypeError, ValueError):
+        return SIDEBAR_ACTIVITY_DAYS_DEFAULT
+    return max(SIDEBAR_ACTIVITY_DAYS_MIN, min(SIDEBAR_ACTIVITY_DAYS_MAX, days))
+
+
+def clamp_auto_archive_days(value) -> int:
+    try:
+        days = int(value)
+    except (TypeError, ValueError):
+        return AUTO_ARCHIVE_DAYS_DEFAULT
+    if days in AUTO_ARCHIVE_DAYS_PRESETS:
+        return days
+    return min(AUTO_ARCHIVE_DAYS_PRESETS, key=lambda preset: abs(preset - days))
+
+
+def get_sidebar_activity_days(user) -> int:
+    """Число дней активности прочитанных в колокольчике (1–7)."""
+    if user is None or not getattr(user, 'pk', None):
+        return SIDEBAR_ACTIVITY_DAYS_DEFAULT
+    try:
+        settings_row = NotificationUserSettings.objects.only('sidebar_activity_days').get(
+            user_id=user.pk,
+        )
+    except NotificationUserSettings.DoesNotExist:
+        return SIDEBAR_ACTIVITY_DAYS_DEFAULT
+    return clamp_sidebar_activity_days(settings_row.sidebar_activity_days)
+
+
+def set_sidebar_activity_days(user, value) -> int:
+    """Сохранить и вернуть clamped значение sidebar_activity_days."""
+    days = clamp_sidebar_activity_days(value)
+    NotificationUserSettings.objects.update_or_create(
+        user_id=user.pk,
+        defaults={'sidebar_activity_days': days},
+    )
+    return days
+
+
+def get_auto_archive_days(user) -> int:
+    """Срок автоархива прочитанных (пресеты 7/14/30/60/90)."""
+    if user is None or not getattr(user, 'pk', None):
+        return AUTO_ARCHIVE_DAYS_DEFAULT
+    try:
+        settings_row = NotificationUserSettings.objects.only('auto_archive_days').get(
+            user_id=user.pk,
+        )
+    except NotificationUserSettings.DoesNotExist:
+        return AUTO_ARCHIVE_DAYS_DEFAULT
+    return clamp_auto_archive_days(settings_row.auto_archive_days)
+
+
+def set_auto_archive_days(user, value) -> int:
+    """Сохранить и вернуть clamped значение auto_archive_days."""
+    days = clamp_auto_archive_days(value)
+    NotificationUserSettings.objects.update_or_create(
+        user_id=user.pk,
+        defaults={'auto_archive_days': days},
+    )
+    return days
 
 
 class PreferenceResolver:
@@ -114,6 +185,8 @@ class PreferencePanelService:
         return {
             'global': cls.get_global_switches(user.pk),
             'sections': sections,
+            'sidebar_activity_days': get_sidebar_activity_days(user),
+            'auto_archive_days': get_auto_archive_days(user),
         }
 
     @staticmethod
@@ -157,8 +230,24 @@ class PreferencePanelService:
 
     @staticmethod
     def apply_patch(user, payload: dict) -> int:
-        """Применить batch-изменения: {'global': {...}, 'items': [...]}. Возвращает число upsert-ов."""
+        """Применить batch-изменения.
+
+        Поддерживает:
+        - global / items — каналы доставки;
+        - sidebar_activity_days — окно колокольчика (1–7);
+        - auto_archive_days — пресеты автоархива (7/14/30/60/90).
+
+        Возвращает число upsert-ов (включая смену days-настроек).
+        """
         updated = 0
+
+        if 'sidebar_activity_days' in payload:
+            set_sidebar_activity_days(user, payload.get('sidebar_activity_days'))
+            updated += 1
+
+        if 'auto_archive_days' in payload:
+            set_auto_archive_days(user, payload.get('auto_archive_days'))
+            updated += 1
 
         global_patch = payload.get('global') or {}
         for channel, enabled in global_patch.items():

@@ -12,6 +12,9 @@ class EmailChannel:
     в панели настроек). Сама отправка асинхронная — через Celery-задачу,
     поставленную строго после commit транзакции dispatch
     (см. transaction.on_commit), иначе воркер может не увидеть запись.
+
+    Пауза: settings.NOTIFICATIONS_EMAIL_DELAY_SECONDS (env, default 300) —
+    окно для notifications.recall без отправки письма.
     """
 
     name = 'email'
@@ -43,8 +46,18 @@ class EmailChannel:
 
         def _enqueue():
             try:
+                from django.conf import settings
+
                 from ..tasks import send_notification_email_task
-                send_notification_email_task.delay(notification_id)
+
+                delay_seconds = max(
+                    0,
+                    int(getattr(settings, 'NOTIFICATIONS_EMAIL_DELAY_SECONDS', 300) or 0),
+                )
+                send_notification_email_task.apply_async(
+                    args=[notification_id],
+                    countdown=delay_seconds,
+                )
             except Exception:
                 logger.exception(
                     'EmailChannel: не удалось поставить задачу отправки для notification=%s',

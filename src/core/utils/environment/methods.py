@@ -4,12 +4,11 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 from collections import OrderedDict
 
-from src.config.paths import MODULES_DIR, VIRTUAL_ENV_DIR
+from src.config.paths import CACHE_DIR, MODULES_DIR
 
 logger = logging.getLogger(__name__)
 
-_ENV_CACHE_DIR = VIRTUAL_ENV_DIR / 'cache'
-_ENV_CACHE_FILE = _ENV_CACHE_DIR / 'modules_env.bin'
+_ENV_CACHE_FILE = CACHE_DIR / 'modules_env.bin'
 
 
 def _get_modules_env_mtime() -> float:

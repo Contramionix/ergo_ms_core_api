@@ -242,6 +242,25 @@ class MenuSeparator(models.Model):
     )
 
     is_active = models.BooleanField(default=True, verbose_name='Активен')
+    is_admin_only = models.BooleanField(
+        default=False,
+        verbose_name='Только для администраторов',
+    )
+
+    allowed_roles = models.ManyToManyField(
+        Role,
+        blank=True,
+        related_name='menu_separators',
+        verbose_name='Разрешённые роли',
+        help_text='Если не выбрано ни одной роли, доступно всем',
+    )
+
+    allowed_role_groups = models.ManyToManyField(
+        RoleGroup,
+        blank=True,
+        related_name='menu_separators',
+        verbose_name='Разрешённые ролевые группы',
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

@@ -34,14 +34,17 @@ class ErgoUser(AbstractUser):
         swappable = 'AUTH_USER_MODEL'
 
     def get_full_name(self) -> str:
-        """Формат: «Имя Отчество Фамилия»."""
-        name_parts = [self.first_name]
-        middle_name = (self.middle_name or '').strip()
-        if middle_name:
-            name_parts.append(middle_name)
+        """Формат: «Фамилия Имя Отчество»."""
+        name_parts = []
         last_name = (self.last_name or '').strip()
         if last_name:
             name_parts.append(last_name)
+        first_name = (self.first_name or '').strip()
+        if first_name:
+            name_parts.append(first_name)
+        middle_name = (self.middle_name or '').strip()
+        if middle_name:
+            name_parts.append(middle_name)
 
         full_name = ' '.join(part for part in name_parts if part and str(part).strip())
         return full_name.strip() or self.username or self.email

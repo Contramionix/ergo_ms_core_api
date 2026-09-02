@@ -1,8 +1,19 @@
 from rest_framework import serializers
 
 from . import catalog
-from .core_actions import THEME_UNDONE, UNDO_PERFORMED
 from .models import AuditEvent
+
+
+class RecordUndoSerializer(serializers.Serializer):
+    """Тело POST record-undo от клиентского reportUndo."""
+
+    kind = serializers.CharField(max_length=128)
+    label = serializers.CharField(max_length=255)
+    entity_label = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    entity_type = serializers.CharField(max_length=64, required=False, allow_blank=True)
+    entity_ref = serializers.CharField(max_length=128, required=False, allow_blank=True)
+    source_module = serializers.CharField(max_length=64, required=False, allow_blank=True)
+    meta = serializers.DictField(required=False)
 
 
 class _AuditCatalogMixin(serializers.Serializer):
@@ -29,7 +40,7 @@ class _AuditCatalogMixin(serializers.Serializer):
         return self._catalog().get(obj.source_module or '')
 
     def _spec(self, obj):
-        return catalog.find_action_spec(obj.source_module or '', obj.action or '')
+        return catalog.get_action_spec(obj.source_module or '', obj.action or '')
 
     def get_actor_ref(self, obj):
         actor = obj.actor
@@ -51,21 +62,8 @@ class _AuditCatalogMixin(serializers.Serializer):
         return (getattr(actor, 'middle_name', None) or '') if actor else ''
 
     def get_action_label(self, obj):
-        action = obj.action or ''
-        if action == UNDO_PERFORMED:
-            meta = obj.meta if isinstance(obj.meta, dict) else {}
-            undo_kind = str(meta.get('undo_kind') or '').strip()
-            undo_label = str(meta.get('undo_label') or '').strip()
-            if undo_kind.startswith('theme.'):
-                if undo_label:
-                    return f'Отмена изменения темы: {undo_label}'
-                return 'Отмена изменения темы'
-            if undo_label:
-                return f'Отмена: {undo_label}'
-        if action == THEME_UNDONE:
-            return 'Отмена изменения темы'
         spec = self._spec(obj)
-        return spec['label'] if spec else action
+        return spec['label'] if spec else obj.action
 
     def get_module_label(self, obj):
         section = self._section(obj)

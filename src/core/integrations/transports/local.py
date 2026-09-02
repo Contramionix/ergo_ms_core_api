@@ -13,6 +13,7 @@ import threading
 from typing import Any, Callable
 
 from ..exceptions import DuplicateProvider
+from .bind_kwargs import kwargs_accepted_by_handler
 
 logger = logging.getLogger('integrations.bridge.local')
 
@@ -70,7 +71,7 @@ class LocalTransport:
             handler = self._providers.get(name)
         if handler is None:
             return default
-        return handler(*args, **kwargs)
+        return handler(*args, **kwargs_accepted_by_handler(handler, kwargs))
 
     def all(self, group: str) -> dict[str, Any]:
         with self._lock:

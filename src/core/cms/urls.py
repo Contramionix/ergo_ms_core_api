@@ -4,6 +4,8 @@ from src.core.cms.views import (
     UserPublicInfoView,
     SyncAllProjectPages,
     GetCMSPages,
+    SyncApiEndpointsView,
+    GetApiEndpointsView,
 )
 from src.core.cms.disabled_modules_view import DisabledModulesView
 from src.core.cms.client_browser_log import ClientBrowserLogView
@@ -19,4 +21,6 @@ urlpatterns = [
 
     path('patch-all-project-pages', SyncAllProjectPages.as_view(), name='set all pages'),
     path('get-cms-pages', GetCMSPages.as_view(), name='get all pages'),
+    path('sync-api-endpoints', SyncApiEndpointsView.as_view(), name='sync_api_endpoints'),
+    path('api-endpoints', GetApiEndpointsView.as_view(), name='get_api_endpoints'),
 ]

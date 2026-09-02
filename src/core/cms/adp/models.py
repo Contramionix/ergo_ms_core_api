@@ -61,12 +61,14 @@ class UserProfile(models.Model):
     
     @property
     def full_name(self):
-        """Формат: Имя Отчество Фамилия"""
-        name_parts = [self.user.first_name]
-        if self.user.middle_name:
-            name_parts.append(self.user.middle_name)
+        """Формат: Фамилия Имя Отчество"""
+        name_parts = []
         if self.user.last_name:
             name_parts.append(self.user.last_name)
+        if self.user.first_name:
+            name_parts.append(self.user.first_name)
+        if self.user.middle_name:
+            name_parts.append(self.user.middle_name)
         full_name = " ".join(part for part in name_parts if part and part.strip())
         return full_name or self.user.username
 
@@ -220,7 +222,7 @@ class Policy(models.Model):
     """
     POLICY_TYPES = [
         ('url', 'Доступ к URL'),
-        ('component', 'Доступ к компоненту'),  # Для будущего использования
+        ('api', 'Доступ к API'),
     ]
     
     ACTION_TYPES = [
@@ -232,7 +234,7 @@ class Policy(models.Model):
     policy_type = models.CharField(max_length=20, choices=POLICY_TYPES, default='url', verbose_name='Тип политики')
     action = models.CharField(max_length=10, choices=ACTION_TYPES, default='allow', verbose_name='Действие')
     
-    # URL или путь к компоненту
+    # URL страницы или API path
     resource_path = models.CharField(max_length=500, verbose_name='Путь к ресурсу')
     
     # Поддержка wildcards для URL (например, /api/users/*)

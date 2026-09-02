@@ -9,10 +9,17 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
-from typing import Callable, Mapping, Optional, Sequence
+from typing import Callable, Mapping, Match, Optional, Sequence
+
+# Cursor линкует http://localhost:8000/ в терминале и иногда открывает Browser Tab.
+_LOCAL_HTTP_URL = re.compile(
+    r'https?://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:/[^\s]*)?',
+    re.IGNORECASE,
+)
 
 ENV_API_START_WALL = 'ERGO_API_START_WALL'
 ENV_MEDIA_START_WALL = 'ERGO_MEDIA_API_START_WALL'
@@ -111,6 +118,28 @@ def try_print_api_ready(stream=None, *, reason: str = '') -> bool:
     return try_print_service_ready('API', stream)
 
 
+def hide_local_http_urls(text: str) -> str:
+    """Пишет localhost-адрес без схемы, чтобы IDE не открывала встроенный браузер."""
+
+    def _replace(match: Match[str]) -> str:
+        rest = match.group(0).split('://', 1)[1].rstrip('/')
+        if '/' in rest:
+            authority, path = rest.split('/', 1)
+            path = '/' + path
+        else:
+            authority, path = rest, ''
+        if authority.startswith('[') and ']:' in authority:
+            host, port = authority.rsplit(']:', 1)
+            host = f'{host}]'
+        elif ':' in authority:
+            host, port = authority.rsplit(':', 1)
+        else:
+            return f'{authority}{path}'
+        return f'{host}, port {port}{path}'
+
+    return _LOCAL_HTTP_URL.sub(_replace, text)
+
+
 def is_listen_ready_message(text: str) -> bool:
     """Daphne: Listening on TCP…"""
     return 'Listening on' in text
@@ -142,10 +171,17 @@ class StreamReadyWrapper:
         self._stream = stream
         self._service_name = service_name
 
-    def write(self, data: str) -> None:
-        self._stream.write(data)
+    def write(self, data: str = '', style_func=None, ending=None, *args, **kwargs):
+        if isinstance(data, str):
+            data = hide_local_http_urls(data)
+        inner = self._stream.write
+        try:
+            result = inner(data, style_func=style_func, ending=ending, *args, **kwargs)
+        except TypeError:
+            result = inner(data)
         if is_dev_server_start_message(data):
             try_print_service_ready(self._service_name, self._stream)
+        return result
 
     def flush(self) -> None:
         self._stream.flush()

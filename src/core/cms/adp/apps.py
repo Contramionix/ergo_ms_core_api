@@ -48,5 +48,6 @@ class AdpConfig(AppConfig):
             return
 
         from src.core.cms.adp import signals  # noqa: F401
+        from src.core.cms.adp import integrations as _adp_integrations  # noqa: F401
 
         signals.connect_user_signals()

@@ -12,6 +12,7 @@ from django.http import HttpResponse
 
 from .permissions import IsGlobalAdmin
 from src.core.utils.mixins import MediaApiFileMixin, read_storage_file_bytes, SwaggerSafeMixin
+from src.core.utils.permissions import ObjectPermissionMixin
 from src.core.audit.mixin import AuditedModelMixin
 
 from .models import *
@@ -57,7 +58,7 @@ class EmailSettingsViewSet(SwaggerSafeMixin, _SettingsAuditMixin, viewsets.Model
     def get_queryset(self):
         return self.get_safe_queryset(EmailSettings.objects.all())
 
-class UserAvatarViewSet(SwaggerSafeMixin, MediaApiFileMixin, viewsets.ModelViewSet):
+class UserAvatarViewSet(ObjectPermissionMixin, SwaggerSafeMixin, MediaApiFileMixin, viewsets.ModelViewSet):
     queryset = UserAvatar.objects.all()
     serializer_class = UserAvatarSerializer
     permission_classes = [IsAuthenticated]
@@ -75,6 +76,9 @@ class UserAvatarViewSet(SwaggerSafeMixin, MediaApiFileMixin, viewsets.ModelViewS
         if not self.request.user.is_authenticated:
             return UserAvatar.objects.none()
         return UserAvatar.objects.filter(user=self.request.user)
+
+    def check_object_permission(self, request, obj):
+        return getattr(obj, 'user_id', None) == getattr(request.user, 'pk', None)
     
     def perform_create(self, serializer):
         if self.request.user.is_authenticated:

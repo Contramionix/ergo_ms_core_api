@@ -2,11 +2,13 @@
 Команда установки всех зависимостей: ядра и всех модулей.
 
 Использование:
-    api install            — установить ядро + модули, удалить лишние пакеты
-    api install --force    — принудительно переустановить зависимости модулей
+    api install                    — установить ядро + модули, удалить лишние пакеты
+    api install --force            — принудительно переустановить зависимости модулей
+    api install --with loadtest    — ядро + optional Poetry-группа (например locust)
 """
 
 import ast
+import hashlib
 import os
 import re
 import shutil
@@ -26,17 +28,70 @@ from commands.base import PoetryCommand
 
 _CORE_LOCK_GROUPS = frozenset({"main"})
 _PIP_BATCH_SIZE = 40
+_PYTHON_DEPS_STAMP_REL = Path("virtual_env/cache/.ergo-python-deps-ok")
 # Инструменты окружения: не в poetry.lock ядра, но нужны для ergoms/poetry/pip.
 _ENV_TOOL_PACKAGES = frozenset({"pip", "setuptools", "wheel", "poetry"})
 # moviepy 2.2.1 объявляет pillow<12.0, хотя с Pillow 12.x обычно работает (см. Zulko/moviepy#2553).
+# Ставим moviepy через --no-deps; runtime-зависимости — вручную, без pillow (конфликт с ядром).
 _NO_DEPS_PACKAGES = frozenset({"moviepy"})
 _NO_DEPS_RUNTIME_DEPS: Dict[str, List[str]] = {
     "moviepy": [
+        "decorator>=4.0.2,<6.0",
         "imageio>=2.5,<3.0",
         "imageio_ffmpeg>=0.2.0",
+        "numpy>=1.25.0",
         "proglog<=1.0.0",
+        "python-dotenv>=0.10",
     ],
 }
+
+
+def _jupyter_enabled_from_env(project_root: Path) -> bool:
+    env_path = project_root / ".env"
+    if not env_path.is_file():
+        return False
+    try:
+        for raw in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            if key.strip() != "ERGO_JUPYTER":
+                continue
+            token = value.strip().strip("'").strip('"').lower()
+            return token not in ("", "none", "0", "false")
+    except OSError:
+        return False
+    return False
+
+
+def _auto_extra_groups(project_root: Path) -> frozenset[str]:
+    groups: set[str] = set()
+    docker_service = os.environ.get("ERGO_DOCKER_SERVICE_NAME", "").strip()
+    if not docker_service:
+        groups.add("mcp")
+    if docker_service == "jupyter" or _jupyter_enabled_from_env(project_root):
+        groups.add("jupyter")
+    return frozenset(groups)
+
+
+def _parse_with_groups(args: Tuple[Any, ...]) -> frozenset[str]:
+    """Poetry-стиль: --with loadtest | --with=loadtest | --with a,b."""
+    groups: list[str] = []
+    tokens = [str(a) for a in args]
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token == '--with' and i + 1 < len(tokens):
+            groups.extend(g.strip() for g in tokens[i + 1].split(',') if g.strip())
+            i += 2
+            continue
+        if token.startswith('--with='):
+            groups.extend(
+                g.strip() for g in token.split('=', 1)[1].split(',') if g.strip()
+            )
+        i += 1
+    return frozenset(groups)
 
 
 class InstallCommand(PoetryCommand):
@@ -59,17 +114,62 @@ class InstallCommand(PoetryCommand):
             print("Ошибка: не удалось найти корневой pyproject.toml.")
             return 1
 
-        print("─── Установка зависимостей ядра (main)...")
-        rc = self._install_core(project_root)
-        if rc != 0:
-            return rc
+        extra_groups = _parse_with_groups(args) | _auto_extra_groups(project_root)
 
+        fingerprint = self._python_deps_fingerprint(project_root, extra_groups=extra_groups)
         root_data = self._read_toml(project_root / "pyproject.toml")
         if root_data is None:
             return 1
 
         module_configs = self._scan_module_configs(project_root)
         module_only: Dict[str, Any] = {}
+        if module_configs:
+            merged_deps, _conflicts = self._merge_dependencies(
+                root_data, module_configs
+            )
+            root_deps = self._get_poetry_deps(root_data)
+            module_only = {
+                pkg: constraint
+                for pkg, constraint in merged_deps.items()
+                if pkg != "python" and pkg not in root_deps
+            }
+
+        if not force:
+            unsatisfied = (
+                self._filter_unsatisfied_module_deps(module_only, project_root)
+                if module_only
+                else {}
+            )
+            stamp_ok = self._python_deps_stamp_matches(project_root, fingerprint)
+            # Stamp совпал — достаточно проверки модульных пакетов (быстрый путь).
+            # Stamp отсутствует/устарел — сверить poetry.lock с venv без poetry install.
+            if not unsatisfied and (
+                stamp_ok
+                or self._core_lock_satisfied(project_root, extra_groups=extra_groups)
+            ):
+                self._write_python_deps_stamp(project_root, fingerprint)
+                if stamp_ok:
+                    print(
+                        "─── Зависимости Python уже актуальны "
+                        "(fingerprint совпал) — установка пропущена."
+                    )
+                else:
+                    print(
+                        "─── Зависимости Python уже в окружении "
+                        "(stamp обновлён) — poetry install пропущен."
+                    )
+                return 0
+
+        if extra_groups:
+            print(
+                "─── Установка зависимостей ядра (main + "
+                f"{', '.join(sorted(extra_groups))})..."
+            )
+        else:
+            print("─── Установка зависимостей ядра (main)...")
+        rc = self._install_core(project_root, extra_groups=extra_groups)
+        if rc != 0:
+            return rc
 
         if not module_configs:
             print("Модульных pyproject.toml не найдено.")
@@ -119,28 +219,92 @@ class InstallCommand(PoetryCommand):
         if rc != 0:
             return rc
 
-        rc = self._remove_orphaned_packages(project_root, module_only)
+        rc = self._remove_orphaned_packages(
+            project_root, module_only, extra_groups=extra_groups
+        )
         if rc != 0:
             return rc
 
-        return self._prune_unused_dep_caches(project_root, module_only)
+        rc = self._prune_unused_dep_caches(
+            project_root, module_only, extra_groups=extra_groups
+        )
+        if rc != 0:
+            return rc
 
-    def _install_core(self, project_root: Path) -> int:
+        self._write_python_deps_stamp(project_root, fingerprint)
+        return 0
+
+    def _python_deps_fingerprint(
+        self,
+        project_root: Path,
+        *,
+        extra_groups: frozenset[str] = frozenset(),
+    ) -> str:
+        digest = hashlib.sha256()
+        digest.update(
+            f"groups:{','.join(sorted(extra_groups))}\n".encode("utf-8")
+        )
+        digest.update(
+            f"disabled:{os.environ.get('DISABLED_MODULES', '')}\n".encode("utf-8")
+        )
+        for rel in ("poetry.lock", "pyproject.toml"):
+            path = project_root / rel
+            if not path.is_file():
+                continue
+            digest.update(rel.encode("utf-8"))
+            digest.update(path.read_bytes())
+        modules_dir = project_root / "modules"
+        if modules_dir.is_dir():
+            for config_path in sorted(modules_dir.glob("*/pyproject.toml")):
+                rel = config_path.relative_to(project_root).as_posix()
+                digest.update(rel.encode("utf-8"))
+                digest.update(config_path.read_bytes())
+        return digest.hexdigest()
+
+    def _python_deps_stamp_path(self, project_root: Path) -> Path:
+        return project_root / _PYTHON_DEPS_STAMP_REL
+
+    def _python_deps_stamp_matches(self, project_root: Path, fingerprint: str) -> bool:
+        stamp = self._python_deps_stamp_path(project_root)
+        if not stamp.is_file():
+            return False
+        try:
+            return stamp.read_text(encoding="utf-8").strip() == fingerprint
+        except OSError:
+            return False
+
+    def _write_python_deps_stamp(self, project_root: Path, fingerprint: str) -> None:
+        stamp = self._python_deps_stamp_path(project_root)
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(fingerprint + "\n", encoding="utf-8")
+
+    def _install_core(
+        self,
+        project_root: Path,
+        *,
+        extra_groups: frozenset[str] = frozenset(),
+    ) -> int:
         env = os.environ.copy()
         env["POETRY_VIRTUALENVS_CREATE"] = "false"
-        result = subprocess.run(
-            [
-                "poetry",
-                "install",
-                "--no-root",
-                "--only",
-                "main",
-                "--directory",
-                str(project_root),
-            ],
-            cwd=str(project_root),
-            env=env,
-        )
+        pip_cache = project_root / "virtual_env" / "cache" / "pip"
+        poetry_cache = project_root / "virtual_env" / "cache" / "poetry"
+        pip_cache.mkdir(parents=True, exist_ok=True)
+        poetry_cache.mkdir(parents=True, exist_ok=True)
+        env["PIP_CACHE_DIR"] = str(pip_cache)
+        env["POETRY_CACHE_DIR"] = str(poetry_cache)
+        cmd = [
+            "poetry",
+            "install",
+            "--no-root",
+            "--directory",
+            str(project_root),
+        ]
+        if extra_groups:
+            # main + optional groups (не --only main — иначе группа не ставится)
+            cmd.extend(["--with", ",".join(sorted(extra_groups))])
+        else:
+            cmd.extend(["--only", "main"])
+        result = subprocess.run(cmd, cwd=str(project_root), env=env)
         return result.returncode
 
     def _install_module_packages(
@@ -276,6 +440,25 @@ class InstallCommand(PoetryCommand):
             lines.append(self._to_pip_requirement(pkg, constraint, project_root))
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
+    def _core_lock_satisfied(
+        self,
+        project_root: Path,
+        *,
+        extra_groups: frozenset[str] = frozenset(),
+    ) -> bool:
+        """True, если пакеты из poetry.lock (нужные группы) уже стоят нужных версий."""
+        main_versions = self._parse_poetry_lock(
+            project_root / "poetry.lock",
+            groups=self._lock_groups_for_install(extra_groups),
+        )
+        if not main_versions:
+            return False
+        installed = self._get_installed_versions()
+        return all(
+            self._lock_version_matches_installed(name, version, installed)
+            for name, version in main_versions.items()
+        )
+
     def _sync_main_lock_versions(self, project_root: Path) -> int:
         main_versions = self._parse_poetry_lock(
             project_root / "poetry.lock",
@@ -339,6 +522,11 @@ class InstallCommand(PoetryCommand):
             req_line = self._to_pip_requirement(pkg, constraint, project_root)
             if not self._requirement_satisfied(req_line, installed):
                 unsatisfied[pkg] = constraint
+                continue
+            for dep_line in _NO_DEPS_RUNTIME_DEPS.get(canonicalize_name(pkg), []):
+                if not self._requirement_satisfied(dep_line, installed):
+                    unsatisfied[pkg] = constraint
+                    break
         return unsatisfied
 
     def _requirement_satisfied(self, req_line: str, installed: Dict[str, str]) -> bool:
@@ -483,15 +671,24 @@ class InstallCommand(PoetryCommand):
             [sys.executable, "-m", "pip", "uninstall", "-y", *packages],
         )
 
+    def _lock_groups_for_install(
+        self, extra_groups: frozenset[str] = frozenset()
+    ) -> frozenset[str]:
+        return frozenset(_CORE_LOCK_GROUPS | set(extra_groups))
+
     def _desired_installed_packages(
-        self, project_root: Path, module_only: Dict[str, Any]
+        self,
+        project_root: Path,
+        module_only: Dict[str, Any],
+        *,
+        extra_groups: frozenset[str] = frozenset(),
     ) -> Set[str]:
         """Имена пакетов, которые должны остаться в venv (lock + модули + инструменты)."""
         lock_packages = {
             canonicalize_name(name)
             for name in self._parse_poetry_lock(
                 project_root / "poetry.lock",
-                groups=_CORE_LOCK_GROUPS,
+                groups=self._lock_groups_for_install(extra_groups),
             )
         }
         if not lock_packages:
@@ -510,10 +707,16 @@ class InstallCommand(PoetryCommand):
         return self._dependency_closure(roots)
 
     def _remove_orphaned_packages(
-        self, project_root: Path, module_only: Dict[str, Any]
+        self,
+        project_root: Path,
+        module_only: Dict[str, Any],
+        *,
+        extra_groups: frozenset[str] = frozenset(),
     ) -> int:
         """Удаляет пакеты, которых нет в poetry.lock ядра и зависимостях модулей."""
-        desired = self._desired_installed_packages(project_root, module_only)
+        desired = self._desired_installed_packages(
+            project_root, module_only, extra_groups=extra_groups
+        )
         if not desired:
             print(
                 "─── poetry.lock ядра пуст или не найден — "
@@ -543,12 +746,18 @@ class InstallCommand(PoetryCommand):
         return 0
 
     def _prune_unused_dep_caches(
-        self, project_root: Path, module_only: Dict[str, Any]
+        self,
+        project_root: Path,
+        module_only: Dict[str, Any],
+        *,
+        extra_groups: frozenset[str] = frozenset(),
     ) -> int:
         """Чистит virtual_env/cache от артефактов пакетов вне текущих зависимостей."""
         from commands.dep_caches import prune_python_dep_caches
 
-        desired = self._desired_installed_packages(project_root, module_only)
+        desired = self._desired_installed_packages(
+            project_root, module_only, extra_groups=extra_groups
+        )
         if not desired:
             desired = set(self._get_installed_versions())
             desired.update(_ENV_TOOL_PACKAGES)

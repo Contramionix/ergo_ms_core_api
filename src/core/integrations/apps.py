@@ -49,6 +49,8 @@ class IntegrationsConfig(AppConfig):
         if is_lean_schema_cli():
             return
 
+        from . import tasks as _core_outbox_tasks  # noqa: F401
+
         self._configure_bridge()
         self._install_isolation_guard()
         self._ensure_contract_mode()

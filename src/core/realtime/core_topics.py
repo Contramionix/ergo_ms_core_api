@@ -1,7 +1,7 @@
 """Регистрация topic ядра в realtime registry."""
 
 from src.core.cms.adp.services.permissions import PermissionService
-from src.core.messenger.access import has_messenger_access
+from src.core.messenger.access import has_messenger_access, resolve_messenger_object_pk
 from src.core.realtime.registry import register_realtime_topic
 from src.core.realtime.topics import (
     PRESENCE_ADMIN_GROUP,
@@ -32,25 +32,22 @@ def _resolve_user_topic(user, params: dict[str, str]) -> str | None:
 
 
 def _authorize_messenger_topic(user, params: dict[str, str]) -> bool:
-    try:
-        object_id = int(params['object_id'])
-    except (KeyError, TypeError, ValueError):
-        return False
     content_type = params.get('content_type', '')
-    if not content_type:
+    object_id = params.get('object_id', '')
+    if not content_type or object_id in (None, ''):
         return False
     return has_messenger_access(user, content_type, object_id)
 
 
 def _resolve_messenger_topic(_user, params: dict[str, str]) -> str | None:
-    try:
-        object_id = int(params['object_id'])
-    except (KeyError, TypeError, ValueError):
-        return None
     content_type = params.get('content_type', '')
-    if not content_type:
+    object_id = params.get('object_id', '')
+    if not content_type or object_id in (None, ''):
         return None
-    return messenger_group(content_type, object_id)
+    object_pk = resolve_messenger_object_pk(content_type, object_id)
+    if object_pk is None:
+        return None
+    return messenger_group(content_type, object_pk)
 
 
 def _authorize_presence_admin(user, _params: dict[str, str]) -> bool:

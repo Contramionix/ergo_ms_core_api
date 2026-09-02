@@ -2,9 +2,11 @@ import asyncio
 import logging
 
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
+from django.conf import settings
 
 from src.core.cms.adp.ws_auth import user_from_jwt_token
 from src.core.utils.maintenance import is_maintenance_enabled
+from src.core.realtime.transport import is_websocket_transport
 from src.core.realtime.envelope import (
     WS_AUTH_EVENT,
     WS_AUTH_OK_EVENT,
@@ -17,12 +19,28 @@ logger = logging.getLogger('core.cms.adp')
 
 WS_AUTH_TIMEOUT_SEC = 10
 WS_AUTH_CLOSE_UNAUTHORIZED = 4401
+WS_CLOSE_TRANSPORT_DISABLED = 4404
+WS_CLOSE_MESSAGE_TOO_BIG = 1009
 
 
 class WsAuthRejectedError(Exception):
     def __init__(self, close_code: int = WS_AUTH_CLOSE_UNAUTHORIZED):
         self.close_code = close_code
         super().__init__()
+
+
+def _realtime_max_message_bytes() -> int:
+    return int(getattr(settings, 'API_REALTIME_MAX_MESSAGE_BYTES', 262144))
+
+
+def _frame_size_bytes(text_data=None, bytes_data=None) -> int:
+    if text_data is not None:
+        if isinstance(text_data, str):
+            return len(text_data.encode('utf-8'))
+        return len(text_data)
+    if bytes_data is not None:
+        return len(bytes_data)
+    return 0
 
 
 class JwtMessageAuthConsumer(AsyncJsonWebsocketConsumer):
@@ -33,6 +51,9 @@ class JwtMessageAuthConsumer(AsyncJsonWebsocketConsumer):
     _auth_timeout_task: asyncio.Task | None = None
 
     async def connect(self):
+        if not is_websocket_transport():
+            await self.close(code=WS_CLOSE_TRANSPORT_DISABLED)
+            return
         if is_maintenance_enabled():
             return
         self.ws_user = None
@@ -49,6 +70,13 @@ class JwtMessageAuthConsumer(AsyncJsonWebsocketConsumer):
                 pass
             self._auth_timeout_task = None
         await self.on_ws_disconnect(close_code)
+
+    async def receive(self, text_data=None, bytes_data=None, **kwargs):
+        max_bytes = _realtime_max_message_bytes()
+        if _frame_size_bytes(text_data, bytes_data) > max_bytes:
+            await self.close(code=WS_CLOSE_MESSAGE_TOO_BIG)
+            return
+        await super().receive(text_data=text_data, bytes_data=bytes_data, **kwargs)
 
     async def receive_json(self, content, **kwargs):
         if self._auth_pending:

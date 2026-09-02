@@ -2,7 +2,7 @@
 Сценарии доступа к JupyterLab: local / lan / nginx.
 
 Effective bind/public URL и аргументы ServerApp — единый источник для start_jupyter.py
-и settings/jupyter.py. Скрипты не записывают .env.
+и settings/jupyter.py. Пустой API_JUPYTER_TOKEN для lan/nginx заполняет ensure_secret.
 """
 
 from __future__ import annotations
@@ -26,7 +26,9 @@ _VALID_ACCESS_MODES = frozenset({ACCESS_LOCAL, ACCESS_LAN, ACCESS_NGINX, ACCESS_
 
 
 def jupyter_behind_nginx() -> bool:
-    return env.bool('API_JUPYTER_BEHIND_NGINX', default=False) and nginx_enabled()
+    from src.config.ergo_runtime import jupyter_behind_nginx_mode
+
+    return jupyter_behind_nginx_mode()
 
 
 def jupyter_allow_remote() -> bool:
@@ -140,16 +142,16 @@ def validate_jupyter_startup() -> str | None:
     """Возвращает текст ошибки или None, если запуск допустим."""
     mode = effective_jupyter_access_mode()
 
-    if mode == ACCESS_NGINX and not jupyter_behind_nginx():
+    if mode == ACCESS_NGINX and not nginx_enabled():
         return (
-            'Режим nginx требует NGINX_ENABLED=true и API_JUPYTER_BEHIND_NGINX=true. '
-            'Проверьте .env и перезапустите nginx (ergoms install-nginx).'
+            'Режим nginx требует ERGO_PROXY=nginx (или явный NGINX_ENABLED=true). '
+            'Проверьте корневой .env и перезапустите nginx (ergoms install-nginx).'
         )
 
     if mode in (ACCESS_LAN, ACCESS_NGINX) and not get_jupyter_token():
         return (
-            'Для режима доступа «{mode}» задайте API_JUPYTER_TOKEN в .env '
-            '(например: openssl rand -hex 32).'.format(mode=mode)
+            'Для режима доступа «{mode}» задайте API_JUPYTER_TOKEN в env/jupyter.env '
+            '(ergoms generate-secret) или перезапустите start-jupyter — ключ запишется сам.'.format(mode=mode)
         )
 
     return None
@@ -173,9 +175,9 @@ def build_jupyter_server_argv(notebooks_dir: str) -> list[str]:
     ]
 
     if token:
-        argv.extend(['--ServerApp.token', token, '--ServerApp.password', ''])
+        argv.extend(['--IdentityProvider.token', token, '--ServerApp.password', ''])
     else:
-        argv.extend(['--ServerApp.token', '', '--ServerApp.password', ''])
+        argv.extend(['--IdentityProvider.token', '', '--ServerApp.password', ''])
 
     allow_origin = security.get('allow_origin', '')
     if allow_origin:

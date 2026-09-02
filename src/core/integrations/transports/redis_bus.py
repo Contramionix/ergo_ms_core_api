@@ -4,6 +4,10 @@ Redis EventBus ModuleBridge (BRIDGE_EVENT_BUS=redis).
 Локальные подписчики вызываются синхронно; дополнительно событие
 публикуется в Redis для обработчиков на других процессах.
 ``emit`` возвращает результаты только локальных обработчиков.
+
+В Redis уходит JSON: объект ``user`` заменяется на ``user_id`` и
+``user_public_id``. ORM, request и прочие несериализуемые значения
+не публикуются (как в HTTP-мосте).
 """
 
 from __future__ import annotations
@@ -11,7 +15,9 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from datetime import date, datetime
 from typing import Any, Callable
+from uuid import UUID
 
 from django.conf import settings
 
@@ -19,6 +25,72 @@ logger = logging.getLogger('integrations.bridge.redis')
 
 _CHANNEL_PREFIX = 'ergo:bridge:events:'
 _listener_lock = threading.Lock()
+_SKIP_PAYLOAD_KEYS = frozenset({'user', 'user_id', 'user_public_id'})
+
+
+def _is_user_like(value: Any) -> bool:
+    if value is None or isinstance(value, (str, bytes, int, float, bool, dict, list, tuple)):
+        return False
+    if getattr(value, 'pk', None) is None and getattr(value, 'public_id', None) is None:
+        return False
+    return hasattr(value, 'is_authenticated')
+
+
+def _jsonable(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    raise TypeError(f'Bridge Redis: значение типа {type(value).__name__} нельзя сериализовать в JSON')
+
+
+def _event_payload_for_redis(payload: dict[str, Any]) -> dict[str, Any]:
+    """Копия payload для pub/sub: user → идентификаторы, остальное — JSON-примитивы."""
+    safe: dict[str, Any] = {}
+    user = payload.get('user')
+    user_id = payload.get('user_id')
+    user_public_id = payload.get('user_public_id')
+    if _is_user_like(user):
+        if user_id is None:
+            user_id = getattr(user, 'pk', None)
+        if not user_public_id:
+            public_id = getattr(user, 'public_id', None)
+            user_public_id = str(public_id) if public_id else None
+        user = None
+    elif user is not None:
+        try:
+            user = _jsonable(user)
+        except TypeError:
+            user = None
+
+    if user is not None:
+        safe['user'] = user
+    if user_id is not None:
+        try:
+            safe['user_id'] = int(user_id)
+        except (TypeError, ValueError):
+            pass
+    if user_public_id:
+        safe['user_public_id'] = str(user_public_id)
+
+    for key, value in payload.items():
+        if key in _SKIP_PAYLOAD_KEYS:
+            continue
+        try:
+            safe[str(key)] = _jsonable(value)
+        except TypeError:
+            logger.debug(
+                'Bridge Redis: пропуск payload %s (%s)',
+                key,
+                type(value).__name__,
+            )
+    return safe
 
 
 def _redis_client():
@@ -109,7 +181,13 @@ class RedisEventBus:
         if client is None:
             return
         try:
-            body = json.dumps({'event': event, 'payload': payload, 'origin': id(self)}, default=str)
+            body = json.dumps(
+                {
+                    'event': event,
+                    'payload': _event_payload_for_redis(payload),
+                    'origin': id(self),
+                }
+            )
             client.publish(f'{_CHANNEL_PREFIX}{event}', body)
             # также общий канал для подписки «на всё»
             client.publish(f'{_CHANNEL_PREFIX}*', body)

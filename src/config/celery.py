@@ -23,6 +23,7 @@ from src.config.log_format import (
     CELERY_WORKER_TASK_LOG_FORMAT,
 )
 from src.core.utils.auto_api.auto_config import get_env_deploy_type
+from src.core.utils.log_i18n import log_t
 
 # ---------------------------------------------------------------------------
 # БАЗОВАЯ НАСТРОЙКА DJANGO SETTINGS ДЛЯ CELERY
@@ -89,8 +90,8 @@ if IS_CELERY_PROCESS:
     # Автообнаружение задач во всех приложениях
     celery_app.autodiscover_tasks(lambda: settings.INSTALLED_APPS)
 
-    # Модульная конфигурация Celery (без файлового кэша — нужны annotations, queue_limits)
-    MODULE_MANAGER = CeleryModuleManager(use_config_cache=False)
+    # Worker/beat читают bin-кэш; полный импорт celery_config — только при промахе.
+    MODULE_MANAGER = CeleryModuleManager(use_config_cache=True)
     from src.core.utils.celery.startup_format import celery_startup_verbose, format_name_list
 
     _celery_modules = MODULE_MANAGER.get_modules_list()
@@ -157,6 +158,31 @@ if IS_CELERY_PROCESS:
         celery_app.conf.update(
             **_build_common_celery_config(MODULE_MANAGER, MODULE_TASK_ROUTES, MODULE_TASK_QUEUES),
         )
+        from src.core.utils.celery.footprint_history import connect_signals
+        from src.core.utils.celery.overlay_limits import start_overlay_limit_watcher
+
+        connect_signals(celery_app)
+        start_overlay_limit_watcher()
+        try:
+            from src.core.utils.request_id import get_request_id, set_request_id
+            from celery.signals import before_task_publish, task_prerun
+
+            @before_task_publish.connect
+            def _attach_request_id_header(headers=None, **_):
+                if headers is None:
+                    return
+                token = get_request_id()
+                if token:
+                    headers['ergo_request_id'] = token
+
+            @task_prerun.connect
+            def _restore_request_id(task=None, **_):
+                headers = getattr(getattr(task, 'request', None), 'headers', None) or {}
+                token = headers.get('ergo_request_id') or ''
+                if token:
+                    set_request_id(str(token))
+        except Exception:
+            logger.debug('request_id celery signals skipped', exc_info=True)
 
     # -----------------------------------------------------------------------
     # Настройки Celery Beat
@@ -254,13 +280,14 @@ if IS_CELERY_PROCESS:
         return
 
 else:
-    # API (daphne/wsgi): broker после django.setup — см. asgi.py / wsgi.py.
-    # Import celery_app до get_*_application обязателен (set_default), иначе amqp.
+    # API и Django-команды: брокер после django.setup.
+    # Import celery_app до setup обязателен (set_default), иначе amqp://localhost.
+    # CLI: prepare_celery_for_django(); HTTP: asgi.py / wsgi.py.
     _django_celery_lock = threading.Lock()
     _django_celery_configured = False
 
     def ensure_django_celery_configured() -> None:
-        """Broker и маршруты для .delay() из API. Вызывать один раз после Django setup."""
+        """Брокер и маршруты для .delay() из API и Django-команд. После django.setup()."""
         global _django_celery_configured
         if _django_celery_configured:
             return
@@ -285,7 +312,8 @@ else:
                 cached = read_routes_queues_cache(validate_fingerprint=False)
                 routes_source = 'cache'
                 if cached is not None:
-                    routes, queues = cached
+                    routes = cached['routes']
+                    queues = cached['queues']
                 else:
                     from src.core.utils.celery.manager import CeleryModuleManager
 
@@ -306,12 +334,39 @@ else:
                     task_queues=queues,
                 )
                 _django_celery_configured = True
+                try:
+                    from src.core.utils.request_id import get_request_id
+                    from celery.signals import before_task_publish
+
+                    @before_task_publish.connect(weak=False)
+                    def _api_attach_request_id(headers=None, **_):
+                        if headers is None:
+                            return
+                        token = get_request_id()
+                        if token:
+                            headers['ergo_request_id'] = token
+                except Exception:
+                    logger.debug('request_id publish signal skipped', exc_info=True)
                 logger.info(
-                    'Celery (Django): broker=%s routes=%s (%d/%d)',
-                    celery_app.conf.broker_url,
-                    routes_source,
-                    len(routes),
-                    len(queues),
+                    log_t(
+                        'celery_django_broker_configured',
+                        broker=celery_app.conf.broker_url,
+                        routes_source=routes_source,
+                        routes_count=len(routes),
+                        queues_count=len(queues),
+                    ),
                 )
             except Exception as exc:
-                logger.warning('Celery (Django): не удалось сконфигурировать: %s', exc)
+                logger.warning(log_t('celery_django_configure_failed', error=exc))
+
+    _orig_send_task = celery_app.send_task
+
+    def _send_task_with_django_broker(*args, **kwargs):
+        # producer_or_acquire читает broker_url до before_task_publish.
+        from django.conf import settings as django_settings
+
+        if django_settings.configured:
+            ensure_django_celery_configured()
+        return _orig_send_task(*args, **kwargs)
+
+    celery_app.send_task = _send_task_with_django_broker

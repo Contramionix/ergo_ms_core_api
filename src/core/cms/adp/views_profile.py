@@ -4,8 +4,7 @@ from django.contrib.auth import get_user_model
 from django.utils.translation import gettext as _
 
 User = get_user_model()
-from drf_yasg import openapi
-from drf_yasg.utils import swagger_auto_schema
+from src.core.utils.swagger.yasg_compat import swagger_auto_schema, openapi
 from rest_framework import status
 from rest_framework.response import Response
 
@@ -204,7 +203,6 @@ class UserSecuritySettingsView(BaseAPIViewAuthMixin):
                 schema=openapi.Schema(
                     type=openapi.TYPE_OBJECT,
                     properties={
-                        'two_factor_enabled': openapi.Schema(type=openapi.TYPE_BOOLEAN),
                         'push_notifications': openapi.Schema(type=openapi.TYPE_BOOLEAN),
                         'sms_notifications': openapi.Schema(type=openapi.TYPE_BOOLEAN),
                         'profile_visibility': openapi.Schema(type=openapi.TYPE_STRING),
@@ -218,7 +216,6 @@ class UserSecuritySettingsView(BaseAPIViewAuthMixin):
         profile, _created = UserProfile.objects.get_or_create(user=request.user)
 
         security_data = {
-            'two_factor_enabled': profile.two_factor_enabled,
             'push_notifications': profile.push_notifications,
             'sms_notifications': profile.sms_notifications,
             'profile_visibility': profile.profile_visibility,
@@ -234,7 +231,6 @@ class UserSecuritySettingsView(BaseAPIViewAuthMixin):
         request_body=openapi.Schema(
             type=openapi.TYPE_OBJECT,
             properties={
-                'two_factor_enabled': openapi.Schema(type=openapi.TYPE_BOOLEAN),
                 'push_notifications': openapi.Schema(type=openapi.TYPE_BOOLEAN),
                 'sms_notifications': openapi.Schema(type=openapi.TYPE_BOOLEAN),
                 'profile_visibility': openapi.Schema(type=openapi.TYPE_STRING),
@@ -249,8 +245,7 @@ class UserSecuritySettingsView(BaseAPIViewAuthMixin):
     def put(self, request):
         profile, _created = UserProfile.objects.get_or_create(user=request.user)
 
-        for field in ['two_factor_enabled', 'push_notifications',
-                      'sms_notifications', 'profile_visibility']:
+        for field in ['push_notifications', 'sms_notifications', 'profile_visibility']:
             if field in request.data:
                 setattr(profile, field, request.data[field])
 

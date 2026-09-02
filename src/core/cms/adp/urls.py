@@ -189,6 +189,7 @@ urlpatterns = [
         name='import_users_passwords',
     ),
     
+    path('dev-tools/', include('src.core.cms.adp.dev_tools.urls')),
     # Menu Management endpoints (подключаем подмодуль menu)
     path('menu/', include('src.core.cms.adp.menu.urls')),
 ]

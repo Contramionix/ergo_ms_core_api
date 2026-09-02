@@ -1,13 +1,12 @@
-from drf_yasg import openapi
-from drf_yasg.utils import swagger_auto_schema
+from src.core.utils.swagger.yasg_compat import swagger_auto_schema, openapi
 from rest_framework import status
 from rest_framework.response import Response
 
-from src.core.utils.base.base_views import BaseAPIView
+from src.core.utils.base.base_views import BaseAPIViewPublicMixin
 from src.core.utils.maintenance import is_maintenance_enabled, MAINTENANCE_DETAIL
 
 
-class ReadyView(BaseAPIView):
+class ReadyView(BaseAPIViewPublicMixin):
     @swagger_auto_schema(
         operation_description='Готовность API: PostgreSQL и cache (healthcheck оркестрации).',
         responses={
@@ -43,7 +42,7 @@ class ReadyView(BaseAPIView):
         return Response(payload)
 
 
-class MaintenanceStatusView(BaseAPIView):
+class MaintenanceStatusView(BaseAPIViewPublicMixin):
     @swagger_auto_schema(
         operation_description='Статус режима технических works (только чтение).',
         responses={200: openapi.Response('Maintenance status')},

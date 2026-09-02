@@ -4,17 +4,28 @@
 import re
 from typing import List, Dict, Optional
 from django.contrib.auth import get_user_model
+from django.db.models import Q
 from django.utils.translation import gettext as _
 
 User = get_user_model()
+from src.config.security_profile_runtime import adp_default_view_grants
 from src.core.cms.adp.middleware.permission_request_cache import get_request_permission_cache
 from src.core.cms.adp.models import Role, RoleGroup, Policy, UserRole, ModulePermission
 from src.core.integrations import bridge
+from src.core.cms.adp.services.jwt_claims_permissions import (
+    jwt_claims_on_module,
+    remote_check_api_access,
+    remote_check_module_permission,
+    remote_is_admin,
+    user_pk,
+)
 from src.core.integrations.module_contracts import (
     ADP_FILTER_GRANTED_ROLE_GROUP_IDS,
     ADP_PERMISSION_CHECK,
+    ADP_SESSION_SCOPED_DENIED_PERMISSIONS,
     ADP_SESSION_SCOPED_MODULE_PERMISSIONS,
 )
+from src.core.integrations.session_context import merge_session_scope_kwargs
 
 
 class RoleAssignmentError(Exception):
@@ -35,13 +46,27 @@ class PermissionService:
     ADMIN_ROLE_DESCRIPTION = 'Системная роль с полным доступом'
     
     @staticmethod
-    def get_user_role(user: User) -> Optional[UserRole]:
+    def get_user_role(user: User, *, honor_preview: bool = True) -> Optional[UserRole]:
         """Получить активную роль пользователя (без побочных save на read-path)."""
-        if not user or not getattr(user, 'pk', None):
+        pk = user_pk(user)
+        if not user or pk is None:
             return None
 
+        if honor_preview:
+            from src.core.cms.adp.dev_tools.preview import try_preview_user_role
+
+            preview_role = try_preview_user_role(
+                user,
+                lookup=lambda target: PermissionService.get_user_role(
+                    target,
+                    honor_preview=False,
+                ),
+            )
+            if preview_role is not None:
+                return preview_role
+
         cache = get_request_permission_cache()
-        cache_key = f'user_role:{user.pk}'
+        cache_key = f'user_role:{pk}'
         if cache_key in cache:
             return cache[cache_key]
 
@@ -49,7 +74,7 @@ class PermissionService:
             UserRole.objects
             .select_related('role')
             .prefetch_related('role_groups')
-            .filter(user=user, is_active=True)
+            .filter(user_id=pk, is_active=True)
             .first()
         )
 
@@ -208,23 +233,31 @@ class PermissionService:
         return user_role
     
     @staticmethod
-    def _get_active_user_role(user: User) -> Optional[UserRole]:
-        """Активная роль без побочных эффектов (не назначает роль по умолчанию)."""
-        if not user or not getattr(user, 'pk', None):
-            return None
-        return UserRole.objects.select_related('role').filter(
-            user=user,
-            is_active=True,
-        ).first()
-
-    @staticmethod
-    def _is_global_admin(user: User) -> bool:
+    def _is_global_admin(user: User, *, honor_preview: bool = True) -> bool:
         """
         Глобальный администратор: is_superuser и активная ADP-роль admin синхронизированы
         (_sync_django_admin_flags). Проверяем оба источника для устойчивости.
         """
         if not user or not getattr(user, 'is_authenticated', False):
             return False
+        if jwt_claims_on_module():
+            req_cache = get_request_permission_cache()
+            cache_key = f'is_global_admin:{getattr(user, "pk", None)}'
+            if cache_key in req_cache:
+                return req_cache[cache_key]
+            # JWT/снимок — источник правды. HTTP только для токенов без флагов.
+            if getattr(user, 'is_admin', False) or getattr(user, 'is_superuser', False):
+                result = True
+            else:
+                result = remote_is_admin(user)
+            req_cache[cache_key] = result
+            return result
+
+        if honor_preview:
+            from src.core.cms.adp.dev_tools.preview import preview_suppresses_admin
+
+            if preview_suppresses_admin():
+                return False
 
         cache = get_request_permission_cache()
         cache_key = f'is_global_admin:{user.pk}'
@@ -234,7 +267,7 @@ class PermissionService:
         if getattr(user, 'is_superuser', False):
             cache[cache_key] = True
             return True
-        user_role = PermissionService._get_active_user_role(user)
+        user_role = PermissionService.get_user_role(user, honor_preview=False)
         result = bool(
             user_role
             and user_role.is_active
@@ -277,16 +310,16 @@ class PermissionService:
         return None
     
     @staticmethod
-    def _get_url_policies_for_user(user: User, user_role: UserRole) -> list:
+    def _get_policies_for_user(user: User, user_role: UserRole, policy_type: str) -> list:
         cache = get_request_permission_cache()
-        cache_key = f'url_policies:{user.pk}'
+        cache_key = f'{policy_type}_policies:{user.pk}'
         if cache_key in cache:
             return cache[cache_key]
 
         policies = list(
             Policy.objects.filter(
                 role=user_role.role,
-                policy_type='url',
+                policy_type=policy_type,
                 is_active=True,
             )
         )
@@ -299,12 +332,20 @@ class PermissionService:
             policies.extend(
                 Policy.objects.filter(
                     role_group_id__in=group_ids,
-                    policy_type='url',
+                    policy_type=policy_type,
                     is_active=True,
                 )
             )
         cache[cache_key] = policies
         return policies
+
+    @staticmethod
+    def _get_url_policies_for_user(user: User, user_role: UserRole) -> list:
+        return PermissionService._get_policies_for_user(user, user_role, 'url')
+
+    @staticmethod
+    def _get_api_policies_for_user(user: User, user_role: UserRole) -> list:
+        return PermissionService._get_policies_for_user(user, user_role, 'api')
 
     @staticmethod
     def _excluded_granted_role_group_ids(role_group_ids: list[int]) -> set[int]:
@@ -351,6 +392,49 @@ class PermissionService:
         return extra
 
     @staticmethod
+    def _session_scoped_denied_permissions(user: User, organization_id: int | None) -> set[tuple[str, str]]:
+        """Пары (module_name, permission_key), которые модули вычитают из snapshot."""
+        denied: set[tuple[str, str]] = set()
+        if not organization_id or not user:
+            return denied
+        for result in bridge.emit(
+            ADP_SESSION_SCOPED_DENIED_PERMISSIONS,
+            user=user,
+            organization_id=organization_id,
+        ):
+            if not result:
+                continue
+            if isinstance(result, (list, tuple, set, frozenset)):
+                for item in result:
+                    if isinstance(item, (list, tuple)) and len(item) >= 2:
+                        denied.add((item[0], item[1]))
+                    elif isinstance(item, dict):
+                        module_name = item.get('module_name')
+                        permission_key = item.get('permission_key')
+                        if module_name and permission_key:
+                            denied.add((module_name, permission_key))
+        return denied
+
+    @staticmethod
+    def _default_view_permission_pairs(user_role) -> set[tuple[str, str]]:
+        from src.core.cms.adp.services.default_view_permissions import collect_default_view_pairs
+
+        return collect_default_view_pairs(
+            user_role,
+            default_role_name=PermissionService.DEFAULT_ROLE_NAME,
+        )
+
+    @staticmethod
+    def _append_default_view_permissions(user_role, module_permissions: list) -> list:
+        from src.core.cms.adp.services.default_view_permissions import append_default_view_permissions
+
+        return append_default_view_permissions(
+            user_role,
+            module_permissions,
+            default_role_name=PermissionService.DEFAULT_ROLE_NAME,
+        )
+
+    @staticmethod
     def _get_granted_module_permission_keys(user: User) -> set[tuple[str, str]]:
         cache = get_request_permission_cache()
         cache_key = f'module_perm_keys:{user.pk}'
@@ -368,7 +452,8 @@ class PermissionService:
             if group.is_active
         ])
         if not group_ids:
-            cache[cache_key] = set()
+            result = PermissionService._default_view_permission_pairs(user_role)
+            cache[cache_key] = result
             return cache[cache_key]
 
         rows = ModulePermission.objects.filter(
@@ -409,6 +494,9 @@ class PermissionService:
         policies = PermissionService._get_url_policies_for_user(user, user_role)
 
         for policy in sorted(policies, key=lambda p: p.priority, reverse=True):
+            # API-пути не участвуют в клиентском URL-ACL (даже если попали в старые записи)
+            if PermissionService._is_api_resource_path(policy.resource_path):
+                continue
             if PermissionService._match_url_pattern(url_path, policy.resource_path, policy.is_pattern):
                 # Найдено совпадение — возвращаем результат политики
                 return policy.action == 'allow'
@@ -420,6 +508,52 @@ class PermissionService:
             return True
         
         # Для других ролей — запрещаем по умолчанию
+        return False
+
+    @staticmethod
+    def _is_api_resource_path(path: str) -> bool:
+        value = (path or '').strip()
+        return (
+            value == '/api'
+            or value.startswith('/api/')
+            or value.startswith('/api*')
+        )
+
+    @staticmethod
+    def check_api_access(user: User, api_path: str) -> bool:
+        """
+        Проверить доступ пользователя к API path (Policy policy_type='api').
+
+        Семантика как у check_url_access: admin → allow; match по priority;
+        роль «Пользователь» без match → allow; иначе deny.
+        """
+        if PermissionService.is_admin(user):
+            return True
+        if jwt_claims_on_module():
+            req_cache = get_request_permission_cache()
+            cache_key = f'api_access:{getattr(user, "pk", None)}:{api_path}'
+            if cache_key in req_cache:
+                return req_cache[cache_key]
+            result = remote_check_api_access(user, api_path)
+            req_cache[cache_key] = result
+            return result
+
+        user_role = PermissionService.get_user_role(user)
+        if not user_role:
+            return False
+
+        policies = PermissionService._get_api_policies_for_user(user, user_role)
+
+        for policy in sorted(policies, key=lambda p: p.priority, reverse=True):
+            # Клиентские Vue-пути не режут HTTP API
+            if not PermissionService._is_api_resource_path(policy.resource_path):
+                continue
+            if PermissionService._match_url_pattern(api_path, policy.resource_path, policy.is_pattern):
+                return policy.action == 'allow'
+
+        if user_role.role.name == PermissionService.DEFAULT_ROLE_NAME:
+            return True
+
         return False
     
     @staticmethod
@@ -436,19 +570,61 @@ class PermissionService:
             True если URL соответствует шаблону
         """
         if not is_pattern:
-            # Точное совпадение
             return url_path == pattern
-        
-        # Преобразуем wildcard шаблон в regex
-        # * заменяется на [^/]+ (любые символы кроме /)
-        # ** заменяется на .* (любые символы)
-        regex_pattern = pattern.replace('**', '<<<DOUBLE_STAR>>>') \
-                               .replace('*', '[^/]+') \
-                               .replace('<<<DOUBLE_STAR>>>', '.*')
-        regex_pattern = f'^{regex_pattern}$'
-        
+
+        # Пресет «весь модуль» — `/path/**`. Иначе `**` → `/.*` и хаб `/path` не закрывается.
+        if pattern.endswith('/**'):
+            stem = PermissionService._wildcard_to_regex_body(pattern[:-3])
+            regex_pattern = f'^{stem}(?:/.*)?$'
+        else:
+            regex_pattern = f'^{PermissionService._wildcard_to_regex_body(pattern)}$'
+
         return bool(re.match(regex_pattern, url_path))
+
+    @staticmethod
+    def _wildcard_to_regex_body(pattern: str) -> str:
+        return (
+            pattern.replace('**', '<<<DOUBLE_STAR>>>')
+            .replace('*', '[^/]+')
+            .replace('<<<DOUBLE_STAR>>>', '.*')
+        )
     
+    @staticmethod
+    def _denied_api_paths_for_role(user_role, role_groups) -> list:
+        group_ids = [group.id for group in role_groups]
+        query = Q(is_active=True, policy_type='api', action='deny') & (
+            Q(role=user_role.role) | Q(role_group_id__in=group_ids)
+        )
+        paths = []
+        for path in Policy.objects.filter(query).values_list('resource_path', flat=True):
+            if PermissionService._is_api_resource_path(path):
+                paths.append(path)
+        return paths
+
+    @staticmethod
+    def _api_deny_covers_module(user_role, role_groups, module_name: str) -> bool:
+        """True, если deny policy_type=api закрывает /api/<module>/."""
+        slug = (module_name or '').strip('/')
+        if not slug:
+            return False
+        api_path = f'/api/{slug}/'
+        for deny_path in PermissionService._denied_api_paths_for_role(user_role, role_groups):
+            is_pattern = '*' in (deny_path or '')
+            if PermissionService._match_url_pattern(api_path, deny_path, is_pattern):
+                return True
+        return False
+
+    @staticmethod
+    def _default_role_can_view_module(user_role, module_name: str) -> bool:
+        """
+        _view для роли «Пользователь» без групп.
+
+        granted — все модули. denied — только те, которые ACL API не закрыл.
+        """
+        if adp_default_view_grants() == 'granted':
+            return True
+        return not PermissionService._api_deny_covers_module(user_role, [], module_name)
+
     @staticmethod
     def get_user_permissions(user: User, organization_id: int | None = None) -> Dict:
         """
@@ -458,7 +634,8 @@ class PermissionService:
         и доп. effective ModulePermission от модулей.
         """
         user_role = PermissionService.get_user_role(user)
-        
+        default_view_grants = adp_default_view_grants()
+
         if not user_role:
             is_global_admin = PermissionService.is_admin(user)
             return {
@@ -468,6 +645,8 @@ class PermissionService:
                 'role_groups': [],
                 'allowed_urls': [],
                 'denied_urls': [],
+                'denied_api': [],
+                'default_view_grants': default_view_grants,
                 'module_permissions': [],
                 'is_global_admin': is_global_admin,
             }
@@ -484,6 +663,8 @@ class PermissionService:
         )
         
         for policy in role_policies:
+            if PermissionService._is_api_resource_path(policy.resource_path):
+                continue
             if policy.action == 'allow':
                 allowed_urls.append(policy.resource_path)
             else:
@@ -499,6 +680,8 @@ class PermissionService:
             )
             
             for policy in group_policies:
+                if PermissionService._is_api_resource_path(policy.resource_path):
+                    continue
                 if policy.action == 'allow':
                     allowed_urls.append(policy.resource_path)
                 else:
@@ -519,10 +702,29 @@ class PermissionService:
             )
             module_permissions.extend(perms)
 
+        from src.core.cms.adp.dev_tools.preview import resolve_effective_user
+
+        permission_user = resolve_effective_user(user)
         module_permissions.extend(
-            PermissionService._session_scoped_module_permissions(user, organization_id)
+            PermissionService._session_scoped_module_permissions(permission_user, organization_id)
         )
-        
+
+        denied = PermissionService._session_scoped_denied_permissions(permission_user, organization_id)
+        if denied:
+            module_permissions = [
+                perm for perm in module_permissions
+                if (getattr(perm, 'module_name', None), getattr(perm, 'permission_key', None)) not in denied
+            ]
+
+        module_permissions = PermissionService._append_default_view_permissions(
+            user_role,
+            module_permissions,
+        )
+
+        from src.core.cms.adp.dev_tools.preview import apply_preview_module_permissions
+
+        module_permissions = apply_preview_module_permissions(module_permissions)
+
         return {
             'user_id': user.id,
             'username': user.username,
@@ -530,6 +732,10 @@ class PermissionService:
             'role_groups': role_groups,
             'allowed_urls': allowed_urls,
             'denied_urls': denied_urls,
+            'denied_api': PermissionService._denied_api_paths_for_role(
+                user_role, role_groups
+            ),
+            'default_view_grants': default_view_grants,
             'module_permissions': module_permissions,
             'is_global_admin': PermissionService.is_admin(user),
         }
@@ -547,8 +753,10 @@ class PermissionService:
         Иерархия прав:
         1. Администратор → полный доступ
         2. Хуки модулей → контекстная проверка (например, доменные права модуля)
-        3. Ролевые группы пользователя → явно настроенные права (is_granted=True)
-        4. Базовая роль "Пользователь" без групп → базовый просмотр (_view права)
+        3. Ролевые группы пользователя → явно настроенные права (is_granted=True);
+           `_view` роли «Пользователь» при этом не отбирается у модуля без API-deny
+        4. Базовая роль "Пользователь" без групп → `_view`: все модули при
+           API_ADP_DEFAULT_VIEW_GRANTS=granted, иначе только модули без API-deny
         
         Args:
             user: Пользователь
@@ -559,9 +767,37 @@ class PermissionService:
         Returns:
             True если доступ разрешен
         """
-        # Администраторы имеют доступ ко всему
+        from src.core.cms.adp.dev_tools.preview import preview_permission_override
+
+        override = preview_permission_override(module_name, permission_key)
+        if override is False:
+            return False
+        if override is True:
+            return True
+
+        kwargs = merge_session_scope_kwargs(kwargs)
+
         if PermissionService.is_admin(user):
             return True
+
+        if jwt_claims_on_module():
+            from src.core.cms.adp.services.jwt_claims_cache import extra_fingerprint
+
+            req_cache = get_request_permission_cache()
+            cache_key = (
+                f'module_perm:{getattr(user, "pk", None)}:'
+                f'{module_name}:{permission_key}:{extra_fingerprint(kwargs)}'
+            )
+            if cache_key in req_cache:
+                return req_cache[cache_key]
+            result = remote_check_module_permission(
+                user,
+                module_name,
+                permission_key,
+                kwargs,
+            )
+            req_cache[cache_key] = result
+            return result
 
         # Вызываем подписчиков события 'adp.permission_check'.
         # Подписчики модулей добавляют контекстную логику.
@@ -584,13 +820,28 @@ class PermissionService:
 
         if role_groups:
             granted = PermissionService._get_granted_module_permission_keys(user)
-            return (module_name, permission_key) in granted
+            if (module_name, permission_key) in granted:
+                return True
+            if (
+                user_role.role.name == PermissionService.DEFAULT_ROLE_NAME
+                and permission_key.endswith('_view')
+                and not PermissionService._api_deny_covers_module(
+                    user_role, role_groups, module_name
+                )
+            ):
+                return PermissionService._default_role_can_view_module(
+                    user_role,
+                    module_name,
+                )
+            return False
 
         if user_role.role.name == PermissionService.DEFAULT_ROLE_NAME:
-            # Базовые права просмотра для роли "Пользователь"
-            if permission_key.endswith('_view'):
+            if permission_key.endswith('_view') and PermissionService._default_role_can_view_module(
+                user_role,
+                module_name,
+            ):
                 return True
-        
+
         return False
     
     @staticmethod
@@ -633,10 +884,9 @@ class PermissionService:
             user_role.is_active = True
             user_role.assigned_by = assigned_by
             user_role.save()
-        
-        # Назначаем ролевые группы
-        if role_groups:
-            user_role.role_groups.set(role_groups)
+
+        # Пустой список снимает ранее выданные группы (не оставлять старые grants).
+        user_role.role_groups.set(role_groups or [])
         
         PermissionService._sync_django_admin_flags(
             user,

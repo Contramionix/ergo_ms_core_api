@@ -36,6 +36,8 @@ import sys
 import warnings
 from pathlib import Path
 
+from src.core.utils.log_i18n import log_t
+
 from .exceptions import BridgeError
 
 logger = logging.getLogger('integrations.bridge')
@@ -47,7 +49,7 @@ ALLOWED_MODULE_PREFIXES = (
     'core.',
     'django',
     'rest_framework',
-    'drf_yasg',
+    'drf_spectacular',
     'celery',
     'channels',
     'daphne',
@@ -114,26 +116,21 @@ def install_isolation_audit_hook(
         )
 
     if normalized == 'off':
-        logger.debug("BridgeIsolation: disabled via BRIDGE_ISOLATION='off'")
+        logger.debug(log_t('bridge_isolation_disabled'))
         return
 
     if _installed:
-        logger.debug("BridgeIsolation: audit hook already installed; skip")
+        logger.debug(log_t('bridge_isolation_hook_already'))
         return
 
     if modules_dir is None:
-        logger.warning(
-            "BridgeIsolation: modules_dir is not provided; "
-            "runtime guard is not active"
-        )
+        logger.warning(log_t('bridge_isolation_no_modules_dir'))
         return
 
     modules_root = Path(modules_dir).resolve()
     if not modules_root.is_dir():
         logger.warning(
-            "BridgeIsolation: modules dir %s does not exist; "
-            "runtime guard is not active",
-            modules_root,
+            log_t('bridge_isolation_modules_dir_missing', path=modules_root),
         )
         return
 
@@ -188,9 +185,11 @@ def install_isolation_audit_hook(
     sys.addaudithook(_on_audit)
     _installed = True
     logger.info(
-        "BridgeIsolation: audit hook installed (mode=%s, modules_dir=%s)",
-        normalized,
-        modules_root,
+        log_t(
+            'bridge_isolation_hook_installed',
+            mode=normalized,
+            modules_dir=modules_root,
+        ),
     )
 
 
@@ -259,12 +258,13 @@ def _format_violation(
     target_module: str,
     target_owner: str,
 ) -> str:
-    return (
-        f"Direct cross-module import detected: "
-        f"{caller_file}:{caller_line} "
-        f"(module '{caller_owner}') imports '{target_module}'. "
-        f"Use bridge.call('{target_owner}.<operation>', ...) "
-        f"or bridge.emit('{target_owner}.<event>', ...) instead."
+    return log_t(
+        'bridge_isolation_violation',
+        caller_file=caller_file,
+        caller_line=caller_line,
+        caller_owner=caller_owner,
+        target_module=target_module,
+        target_owner=target_owner,
     )
 
 

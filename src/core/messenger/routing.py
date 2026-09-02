@@ -4,7 +4,7 @@ from .consumers import MessengerConsumer
 
 websocket_urlpatterns = [
     path(
-        'ws/messenger/<str:content_type>/<int:object_id>/',
+        'ws/messenger/<str:content_type>/<str:object_id>/',
         MessengerConsumer.as_asgi(),
     ),
 ]

@@ -30,6 +30,7 @@ from src.config.redis_runtime import (
     uses_redis_celery_backend,
 )
 from src.config.settings.base import SYSTEM_DIR, VIRTUAL_ENV_DIR
+from src.config.settings.localization import TIME_ZONE as CELERY_TIMEZONE
 
 for _env_key in ('CELERY_BROKER_URL', 'CELERY_RESULT_BACKEND'):
     _raw_url = os.environ.get(_env_key, '').strip()
@@ -64,5 +65,5 @@ if uses_redis_celery_backend(CELERY_BROKER_URL, CELERY_RESULT_BACKEND):
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
-CELERY_TIMEZONE = 'UTC'
+# CELERY_TIMEZONE — из localization.TIME_ZONE (.env TIME_ZONE).
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True

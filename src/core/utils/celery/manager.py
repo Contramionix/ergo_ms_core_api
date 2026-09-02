@@ -29,16 +29,25 @@ class CeleryModuleManager:
         self.logger = logging.getLogger('celery.manager')
         self._routes: Optional[Dict[str, Any]] = None
         self._queues: Optional[Dict[str, Any]] = None
+        self._queue_limits: Optional[Dict[str, int]] = None
+        self._annotations: Optional[Dict[str, Any]] = None
+        self._additional_configs: Optional[Dict[str, Any]] = None
+        self._module_names: Optional[List[str]] = None
         if use_config_cache:
             self._load_from_cache_or_modules()
         else:
             self._load_modules_from_cache()
     
     def _load_from_cache_or_modules(self) -> None:
-        """Пробует загрузить routes/queues из кэша, иначе — из модулей."""
-        cached = read_routes_queues_cache()
+        """Пробует загрузить routes/queues/limits из кэша, иначе — из модулей."""
+        cached = read_routes_queues_cache(require_worker_fields=True)
         if cached is not None:
-            self._routes, self._queues = cached
+            self._routes = cached['routes']
+            self._queues = cached['queues']
+            self._queue_limits = cached.get('queue_limits') or {}
+            self._annotations = cached.get('annotations') or {}
+            self._additional_configs = cached.get('additional_configs') or {}
+            self._module_names = list(cached.get('modules') or [])
             self.logger.debug('Celery: routes/queues загружены из кэша')
             return
         self._load_modules_from_cache()
@@ -140,9 +149,16 @@ class CeleryModuleManager:
             )
 
     def _save_to_cache(self) -> None:
-        """Сохраняет routes/queues в кэш после загрузки модулей."""
+        """Сохраняет routes/queues и поля worker в кэш после загрузки модулей."""
         if self.modules_configs:
-            write_routes_queues_cache(self.get_all_task_routes(), self.get_all_task_queues())
+            write_routes_queues_cache(
+                self.get_all_task_routes(),
+                self.get_all_task_queues(),
+                queue_limits=self.get_all_queue_limits(),
+                annotations=self.get_all_task_annotations(),
+                additional_configs=self.get_additional_configs(),
+                modules=self.get_modules_list(),
+            )
 
     def _create_default_config(self, module_name: str, app_path: Optional[str] = None) -> CeleryModuleConfig:
         """Создает базовую конфигурацию для модуля"""
@@ -184,7 +200,9 @@ class CeleryModuleManager:
         return queues
     
     def get_all_task_annotations(self) -> Dict[str, Dict[str, Any]]:
-        """Собирает все аннотации задач из всех модулей"""
+        """Собирает все аннотации задач из кэша или модулей."""
+        if self._annotations is not None:
+            return self._annotations
         annotations = {}
         for config in self.modules_configs.values():
             annotations.update(config.get_task_annotations())
@@ -198,7 +216,9 @@ class CeleryModuleManager:
         return loggers
     
     def get_additional_configs(self) -> Dict[str, Any]:
-        """Собирает все дополнительные конфигурации из всех модулей"""
+        """Собирает все дополнительные конфигурации из кэша или модулей."""
+        if self._additional_configs is not None:
+            return self._additional_configs
         configs = {}
         for config in self.modules_configs.values():
             configs.update(config.get_additional_config())
@@ -206,6 +226,8 @@ class CeleryModuleManager:
     
     def get_modules_list(self) -> List[str]:
         """Возвращает список всех загруженных модулей"""
+        if self._module_names is not None:
+            return self._module_names
         return list(self.modules_configs.keys())
     
     def get_module_config(self, module_name: str) -> Optional[CeleryModuleConfig]:
@@ -213,11 +235,9 @@ class CeleryModuleManager:
         return self.modules_configs.get(module_name)
     
     def get_all_queue_limits(self) -> Dict[str, int]:
-        """
-        Собирает лимиты параллелизма (только при загрузке из модулей, не из кэша).
-        """
-        if self._routes is not None:
-            return {}
+        """Собирает лимиты параллелизма из кэша или модулей."""
+        if self._queue_limits is not None:
+            return self._queue_limits
         limits = {}
         for module_name, config in self.modules_configs.items():
             max_concurrent = config.get_max_concurrent_tasks()

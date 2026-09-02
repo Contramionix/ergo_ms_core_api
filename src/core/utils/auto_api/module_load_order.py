@@ -1,33 +1,47 @@
 """
-Порядок загрузки модулей по ``module_requires`` на AppConfig.
+Порядок загрузки модулей по ``requires`` из ``modules/<name>/integrations.yaml``.
 
 Django вызывает ``AppConfig.ready()`` в порядке ``INSTALLED_APPS``.
-Объявление ``module_requires = ('tasks', ...)`` на конфиге модуля
-(имена папок ``modules/<name>``) позволяет топологически упорядочить
-модульные приложения: провайдеры ModuleBridge раньше потребителей.
+Объявление ``requires`` (имена папок ``modules/<name>``) позволяет
+топологически упорядочить модульные приложения: провайдеры ModuleBridge
+раньше потребителей.
+
+``extends`` — опциональные расширяющие модули: отсутствие не ошибка,
+в топсорт не входят (чтобы не создавать циклы с ``requires`` расширителя).
 """
 
 from __future__ import annotations
 
-import ast
 import logging
 from collections import defaultdict, deque
-from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Tuple
 
 from django.core.exceptions import ImproperlyConfigured
 
-from src.config.settings.base import MODULES_DIR
+from src.core.utils.auto_api.module_integrations import (
+    clear_module_integrations_cache,
+    read_module_integrations,
+)
 
 logger = logging.getLogger('utils')
 
 
-def _microservice_peer_names() -> frozenset[str]:
-    """Имена модулей из MICROSERVICE_MODULES (доступны в другом процессе через мост)."""
+def _remote_peer_names() -> frozenset[str]:
+    """Модули в другом процессе: MICROSERVICE_MODULES и ключи BRIDGE_SERVICE_URLS."""
     import os
 
+    names: set[str] = set()
     raw = os.environ.get('MICROSERVICE_MODULES', '') or ''
-    return frozenset(m.strip() for m in raw.split(',') if m.strip())
+    names.update(item.strip() for item in raw.split(',') if item.strip())
+    urls = os.environ.get('BRIDGE_SERVICE_URLS', '') or ''
+    for part in urls.split(','):
+        part = part.strip()
+        if not part or '=' not in part:
+            continue
+        name = part.split('=', 1)[0].strip()
+        if name:
+            names.add(name)
+    return frozenset(names)
 
 
 def module_name_from_app(app_path: str) -> str | None:
@@ -40,72 +54,14 @@ def module_name_from_app(app_path: str) -> str | None:
     return parts[1]
 
 
-def _const_str_tuple(node: ast.AST) -> Tuple[str, ...]:
-    """Читает кортеж/список строковых литералов из AST."""
-    if isinstance(node, (ast.Tuple, ast.List)):
-        values: List[str] = []
-        for elt in node.elts:
-            if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
-                values.append(elt.value)
-            else:
-                return ()
-        return tuple(values)
-    if isinstance(node, ast.Constant) and node.value == ():
-        return ()
-    return ()
-
-
-def parse_module_requires_from_apps_py(apps_py: Path) -> Tuple[str, ...]:
-    """
-    Извлекает ``module_requires`` из класса AppConfig в apps.py без импорта.
-
-    Берётся объединение объявлений со всех классов файла (обычно один конфиг).
-    """
-    try:
-        source = apps_py.read_text(encoding='utf-8')
-    except OSError:
-        return ()
-
-    try:
-        tree = ast.parse(source, filename=str(apps_py))
-    except SyntaxError:
-        logger.warning('Не удалось разобрать %s для module_requires', apps_py)
-        return ()
-
-    found: List[str] = []
-    seen: set[str] = set()
-    for node in tree.body:
-        if not isinstance(node, ast.ClassDef):
-            continue
-        for item in node.body:
-            value_node = None
-            if isinstance(item, ast.Assign):
-                for target in item.targets:
-                    if isinstance(target, ast.Name) and target.id == 'module_requires':
-                        value_node = item.value
-                        break
-            elif (
-                isinstance(item, ast.AnnAssign)
-                and isinstance(item.target, ast.Name)
-                and item.target.id == 'module_requires'
-                and item.value is not None
-            ):
-                value_node = item.value
-            if value_node is None:
-                continue
-            for name in _const_str_tuple(value_node):
-                if name not in seen:
-                    seen.add(name)
-                    found.append(name)
-    return tuple(found)
-
-
 def read_module_requires(module_name: str) -> Tuple[str, ...]:
-    """Читает ``module_requires`` из ``modules/<name>/api/apps.py``."""
-    apps_py = Path(MODULES_DIR) / module_name / 'api' / 'apps.py'
-    if not apps_py.is_file():
-        return ()
-    return parse_module_requires_from_apps_py(apps_py)
+    """Читает обязательные зависимости из ``modules/<name>/integrations.yaml``."""
+    return read_module_integrations(module_name).requires
+
+
+def read_module_extends(module_name: str) -> Tuple[str, ...]:
+    """Читает расширяющие зависимости из ``modules/<name>/integrations.yaml``."""
+    return read_module_integrations(module_name).extends
 
 
 def _topo_sort_modules(
@@ -115,34 +71,52 @@ def _topo_sort_modules(
     """
     Топологическая сортировка имён модулей (Kahn).
 
-    При равной готовности сохраняет исходный порядок (стабильность).
+    Нет обязательной зависимости — потребитель выкидывается из порядка
+    (WARNING), остальные модули остаются. При равной готовности сохраняет
+    исходный порядок (стабильность).
     """
     name_set = set(module_names)
-    indegree = {name: 0 for name in module_names}
-    edges: Dict[str, List[str]] = defaultdict(list)
+    remote_peers = _remote_peer_names()
+    excluded: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for name in module_names:
+            if name in excluded:
+                continue
+            for dep in requires.get(name, ()):
+                if dep in remote_peers:
+                    continue
+                if dep in name_set and dep not in excluded:
+                    continue
+                reason = (
+                    'отключён или отсутствует в modules/'
+                    if dep not in name_set
+                    else 'сам пропущен из-за своей зависимости'
+                )
+                logger.warning(
+                    'Модуль %r пропущен: requires %r (%s). '
+                    'Остальные модули загружаются.',
+                    name,
+                    dep,
+                    reason,
+                )
+                excluded.add(name)
+                changed = True
+                break
 
-    remote_peers = _microservice_peer_names()
-    for name in module_names:
+    remaining = [name for name in module_names if name not in excluded]
+    name_set = set(remaining)
+    indegree = {name: 0 for name in remaining}
+    edges = defaultdict(list)
+    for name in remaining:
         for dep in requires.get(name, ()):
             if dep not in name_set:
-                # MODULE_RUNTIME=microservice: зависимость в другом HTTP-процессе.
-                if dep in remote_peers:
-                    logger.debug(
-                        'module_requires: %r → %r пропущен в этом процессе '
-                        '(peer из MICROSERVICE_MODULES)',
-                        name,
-                        dep,
-                    )
-                    continue
-                raise ImproperlyConfigured(
-                    f"Модуль {name!r} объявил module_requires={(requires.get(name),)}: "
-                    f"зависимость {dep!r} не найдена среди установленных модулей "
-                    f"(отключена в DISABLED_MODULES или отсутствует в modules/)."
-                )
+                continue
             edges[dep].append(name)
             indegree[name] += 1
 
-    queue = deque([name for name in module_names if indegree[name] == 0])
+    queue = deque([name for name in remaining if indegree[name] == 0])
     ordered: List[str] = []
 
     while queue:
@@ -153,19 +127,34 @@ def _topo_sort_modules(
             if indegree[child] == 0:
                 queue.append(child)
 
-    if len(ordered) != len(module_names):
-        leftover = [name for name in module_names if name not in ordered]
+    if len(ordered) != len(remaining):
+        leftover = [name for name in remaining if name not in ordered]
         cycle_hint = ', '.join(leftover)
         raise ImproperlyConfigured(
-            f"Цикл в module_requires между модулями: {cycle_hint}. "
-            f"Проверьте AppConfig.module_requires в modules/*/api/apps.py."
+            f"Цикл в integrations.yaml requires между модулями: {cycle_hint}. "
+            f"Проверьте modules/*/integrations.yaml."
         )
     return ordered
 
 
+def _log_extends(module_order: Sequence[str], name_set: set[str]) -> None:
+    for name in module_order:
+        extends = read_module_extends(name)
+        if not extends:
+            continue
+        for peer in extends:
+            present = peer in name_set
+            logger.debug(
+                'integrations.extends: модуль %r расширяется %r (%s)',
+                name,
+                peer,
+                'установлен' if present else 'отсутствует',
+            )
+
+
 def sort_discovered_apps(apps: Iterable[str]) -> List[str]:
     """
-    Сортирует discovered apps: ядро как было, модули — по module_requires.
+    Сортирует discovered apps: ядро как было, модули — по requires из integrations.yaml.
 
     Приложения одного модуля сохраняют относительный порядок discovery.
     """
@@ -185,8 +174,10 @@ def sort_discovered_apps(apps: Iterable[str]) -> List[str]:
             module_order.append(name)
         by_module[name].append(app)
 
+    clear_module_integrations_cache()
     requires = {name: read_module_requires(name) for name in module_order}
     sorted_names = _topo_sort_modules(module_order, requires)
+    _log_extends(module_order, set(module_order))
 
     result = list(core_apps)
     for name in sorted_names:
@@ -194,7 +185,7 @@ def sort_discovered_apps(apps: Iterable[str]) -> List[str]:
 
     if requires and any(requires.values()):
         logger.debug(
-            'Discovered apps: порядок модулей по module_requires: %s',
+            'Discovered apps: порядок модулей по integrations.requires: %s',
             ' → '.join(sorted_names),
         )
     return result

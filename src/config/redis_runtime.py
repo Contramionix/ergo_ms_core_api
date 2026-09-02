@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from src.config.env import env
 from src.config.ergo_runtime import redis_mode_enabled
@@ -43,9 +43,12 @@ def _load_redis_section() -> dict[str, Any]:
     if _REDIS_SECTION_CACHE is not None:
         return _REDIS_SECTION_CACHE
 
-    from src.core.utils.database.config_manager import _get_cached_yaml
+    from src.core.utils.database.config_manager import (
+        _get_cached_yaml,
+        resolve_databases_yaml_path,
+    )
 
-    databases = _get_cached_yaml(SYSTEM_DIR / 'databases.yaml') or {}
+    databases = _get_cached_yaml(resolve_databases_yaml_path(SYSTEM_DIR)) or {}
     section = databases.get('redis')
     if isinstance(section, dict):
         _REDIS_SECTION_CACHE = dict(section)
@@ -84,7 +87,13 @@ def _normalize_redis_url(url: str) -> str:
     if not parts.hostname or parts.hostname.strip().lower() not in _docker_service_redis_names():
         return url
     port = parts.port or redis_port()
-    netloc = f'{_HOST_LOOPBACK}:{port}'
+    userinfo = ''
+    if parts.password is not None:
+        user = parts.username or ''
+        userinfo = f'{user}:{parts.password}@'
+    elif parts.username:
+        userinfo = f'{parts.username}@'
+    netloc = f'{userinfo}{_HOST_LOOPBACK}:{port}'
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
@@ -178,8 +187,37 @@ def redis_db_celery_result() -> int:
         return 3
 
 
+def redis_password() -> str:
+    """Пароль Redis из databases.yaml → redis.password (пусто = без AUTH)."""
+    section = _load_redis_section()
+    raw = section.get('password', '')
+    if raw is None:
+        return ''
+    return str(raw).strip()
+
+
+def redis_username() -> str:
+    """ACL-пользователь Redis из databases.yaml → redis.user (пусто = default)."""
+    section = _load_redis_section()
+    raw = section.get('user', '')
+    if raw is None:
+        return ''
+    return str(raw).strip()
+
+
 def redis_url(db: int) -> str:
-    return f'redis://{redis_host()}:{redis_port()}/{db}'
+    host = redis_host()
+    port = redis_port()
+    password = redis_password()
+    username = redis_username()
+    if password and username:
+        return (
+            f'redis://{quote(username, safe="")}:{quote(password, safe="")}'
+            f'@{host}:{port}/{db}'
+        )
+    if password:
+        return f'redis://:{quote(password, safe="")}@{host}:{port}/{db}'
+    return f'redis://{host}:{port}/{db}'
 
 
 def sanitize_celery_redis_url(url: str) -> str:

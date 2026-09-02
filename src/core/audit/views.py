@@ -1,5 +1,4 @@
 import csv
-import re
 import uuid
 
 from django.db import connection
@@ -13,7 +12,6 @@ from src.core.cms.adp.services.permissions import PermissionService
 from src.core.utils.mixins import SwaggerSafeMixin
 
 from . import catalog
-from .core_actions import MODULE, SETTINGS_MODULE, UNDO_PERFORMED
 from .dimensions import (
     get_dimensions_for_ui,
     get_read_guard_dimensions,
@@ -22,10 +20,12 @@ from .dimensions import (
 from .models import AuditEvent
 from .pagination import AuditPagination
 from .permissions import CanReadAuditLog
-from .serializers import AuditEventDetailSerializer, AuditEventListSerializer
+from .serializers import (
+    AuditEventDetailSerializer,
+    AuditEventListSerializer,
+    RecordUndoSerializer,
+)
 from .service import AuditService
-
-_UNDO_KIND_RE = re.compile(r'^[a-z][a-z0-9_.-]{0,63}$')
 
 
 class AuditEventViewSet(SwaggerSafeMixin, viewsets.ReadOnlyModelViewSet):
@@ -33,12 +33,18 @@ class AuditEventViewSet(SwaggerSafeMixin, viewsets.ReadOnlyModelViewSet):
 
     Доступен глобальному администратору и тем, кому разрешает провайдер
     ``audit.can_read`` в пределах read_guard-измерений scope.
-    Фильтры: модуль, действие, инициатор, важность, период, измерения scope,
-    поиск по объекту/инициатору.
+    Фильтры: модуль, действие / actions / exclude_actions, инициатор, важность,
+    период, измерения scope, поиск по объекту/инициатору.
     """
 
     permission_classes = [permissions.IsAuthenticated, CanReadAuditLog]
     pagination_class = AuditPagination
+
+    def get_permissions(self):
+        # Запись отмены — любой авторизованный (toast Undo), не только читатели журнала.
+        if getattr(self, 'action', None) == 'record_undo':
+            return [permissions.IsAuthenticated()]
+        return super().get_permissions()
 
     def get_serializer_class(self):
         if self.action == 'retrieve':
@@ -136,6 +142,12 @@ class AuditEventViewSet(SwaggerSafeMixin, viewsets.ReadOnlyModelViewSet):
             qs = qs.filter(scope__contains={dim['key']: self._coerce_dimension_value(raw)})
         return qs
 
+    @staticmethod
+    def _parse_action_list(raw) -> list[str]:
+        if not raw:
+            return []
+        return [part.strip() for part in str(raw).split(',') if part.strip()]
+
     def _apply_filters(self, qs):
         params = self.request.query_params
 
@@ -143,25 +155,15 @@ class AuditEventViewSet(SwaggerSafeMixin, viewsets.ReadOnlyModelViewSet):
         if source_module:
             qs = qs.filter(source_module=source_module)
 
-        actions_csv = (params.get('actions') or '').strip()
-        if actions_csv:
-            actions = [item.strip() for item in actions_csv.split(',') if item.strip()][:20]
-            if actions:
-                qs = qs.filter(action__in=actions)
-        else:
-            action_value = params.get('action')
-            if action_value:
-                qs = qs.filter(action=action_value)
-
-        exclude_actions_csv = (params.get('exclude_actions') or '').strip()
-        if exclude_actions_csv:
-            exclude_actions = [
-                item.strip()
-                for item in exclude_actions_csv.split(',')
-                if item.strip()
-            ][:20]
-            if exclude_actions:
-                qs = qs.exclude(action__in=exclude_actions)
+        include_actions = self._parse_action_list(params.get('actions'))
+        exclude_actions = self._parse_action_list(params.get('exclude_actions'))
+        action_value = (params.get('action') or '').strip()
+        if include_actions:
+            qs = qs.filter(action__in=include_actions)
+        elif action_value:
+            qs = qs.filter(action=action_value)
+        if exclude_actions:
+            qs = qs.exclude(action__in=exclude_actions)
 
         severity = params.get('severity')
         if severity:
@@ -200,9 +202,20 @@ class AuditEventViewSet(SwaggerSafeMixin, viewsets.ReadOnlyModelViewSet):
             if parsed is not None:
                 qs = qs.filter(created_at__lte=parsed)
 
-        search = (params.get('q') or '').strip()
+        search = (params.get('q') or params.get('search') or '').strip()
         if search:
-            qs = self._apply_search_filter(qs, search)
+            from src.core.search.core_indexes import INDEX_AUDIT
+            from src.core.search.fallback import apply_ordered_ids
+            from src.core.search.service import search_index
+
+            result = search_index(
+                INDEX_AUDIT,
+                search,
+                qs,
+                page=1,
+                page_size=10000,
+            )
+            qs = apply_ordered_ids(qs, result.ids) if result.ids else qs.none()
         else:
             qs = qs.order_by('-created_at', '-id')
 
@@ -216,6 +229,7 @@ class AuditEventViewSet(SwaggerSafeMixin, viewsets.ReadOnlyModelViewSet):
             # Поля для JSON-списка не нужны; source_module/action оставляем для каталога.
             qs = qs.defer(
                 'changes',
+                'meta',
                 'user_agent',
                 'request_id',
                 'scope',
@@ -237,68 +251,6 @@ class AuditEventViewSet(SwaggerSafeMixin, viewsets.ReadOnlyModelViewSet):
             return scope
 
         return self._read_scope_values() or {}
-
-    @action(
-        detail=False,
-        methods=['post'],
-        url_path='record-undo',
-        permission_classes=[permissions.IsAuthenticated],
-    )
-    def record_undo(self, request):
-        """Зафиксировать отмену любого действия (toast Undo и аналоги).
-
-        Пишет универсальное ``undo.performed``; детали — в kind/label/meta.
-        Инициатор всегда текущий пользователь (подделать нельзя).
-        """
-        kind = str(request.data.get('kind') or '').strip()
-        label = str(request.data.get('label') or '').strip()[:255]
-        entity_label = str(request.data.get('entity_label') or label or kind)[:255]
-        entity_type = str(request.data.get('entity_type') or 'action')[:64]
-        entity_ref = str(request.data.get('entity_ref') or '')[:128]
-        source_module = str(request.data.get('source_module') or MODULE).strip()[:64]
-        raw_meta = request.data.get('meta')
-
-        if not kind or not _UNDO_KIND_RE.match(kind):
-            return Response(
-                {'error': 'Некорректный тип отмены'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        if not label:
-            return Response(
-                {'error': 'Укажите описание отменённого действия'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        known_modules = {
-            item.get('module') for item in catalog.get_modules() if item.get('module')
-        }
-        known_modules.update({MODULE, SETTINGS_MODULE})
-        if source_module not in known_modules:
-            source_module = MODULE
-
-        meta = {'undo_kind': kind, 'undo_label': label}
-        if isinstance(raw_meta, dict):
-            for key, value in list(raw_meta.items())[:20]:
-                key_str = str(key)[:64]
-                if key_str in meta:
-                    continue
-                if isinstance(value, (str, int, float, bool)) or value is None:
-                    meta[key_str] = value if not isinstance(value, str) else value[:500]
-
-        AuditService.record(
-            action=UNDO_PERFORMED,
-            source_module=source_module,
-            request=request,
-            actor=request.user,
-            entity={
-                'type': entity_type or 'action',
-                'ref': entity_ref,
-                'label': entity_label or label,
-            },
-            meta=meta,
-            severity='info',
-        )
-        return Response({'ok': True})
 
     @action(detail=False, methods=['get'], url_path='catalog')
     def catalog(self, request):
@@ -344,7 +296,7 @@ class AuditEventViewSet(SwaggerSafeMixin, viewsets.ReadOnlyModelViewSet):
         for event in qs:
             section = catalog_data.get(event.source_module or '')
             module_label = section['module_label'] if section else event.source_module
-            spec = section['actions'].get(event.action) if section else None
+            spec = catalog.get_action_spec(event.source_module or '', event.action or '')
             action_label = spec['label'] if spec else event.action
             writer.writerow([
                 event.created_at.strftime('%d.%m.%Y %H:%M:%S'),
@@ -357,3 +309,35 @@ class AuditEventViewSet(SwaggerSafeMixin, viewsets.ReadOnlyModelViewSet):
             ])
 
         return response
+
+    @action(detail=False, methods=['post'], url_path='record-undo')
+    def record_undo(self, request):
+        """Записать отмену действия из toast Undo (клиентский reportUndo)."""
+        serializer = RecordUndoSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        kind = data['kind']
+        label = data['label']
+        source_module = data.get('source_module') or 'core.cms.adp'
+        entity_label = data.get('entity_label') or label
+        entity_type = data.get('entity_type') or 'action'
+        entity_ref = data.get('entity_ref') or ''
+        meta = dict(data.get('meta') or {})
+        meta.setdefault('kind', kind)
+        meta.setdefault('label', label)
+
+        AuditService.record(
+            action='undo.performed',
+            source_module=source_module,
+            actor=request.user,
+            request=request,
+            entity={
+                'type': entity_type,
+                'ref': entity_ref,
+                'label': entity_label,
+            },
+            meta=meta,
+            severity=AuditEvent.SEVERITY_INFO,
+        )
+        return Response({'ok': True}, status=status.HTTP_201_CREATED)

@@ -80,14 +80,20 @@ class ClientMonitorSessionViewSet(SwaggerSafeMixin, viewsets.ReadOnlyModelViewSe
         if date_to:
             qs = qs.filter(last_event_at__lte=date_to)
 
-        search = (request.query_params.get('q') or '').strip()
+        search = (request.query_params.get('q') or request.query_params.get('search') or '').strip()
         if search:
-            qs = qs.filter(
-                Q(user_label__icontains=search)
-                | Q(user_public_id__icontains=search)
-                | Q(user_agent__icontains=search)
-                | Q(client_version__icontains=search)
+            from src.core.search.core_indexes import INDEX_CLIENT_MONITOR
+            from src.core.search.fallback import apply_ordered_ids
+            from src.core.search.service import search_index
+
+            result = search_index(
+                INDEX_CLIENT_MONITOR,
+                search,
+                qs,
+                page=1,
+                page_size=10000,
             )
+            qs = apply_ordered_ids(qs, result.ids) if result.ids else qs.none()
 
         page = self.paginate_queryset(qs)
         serializer = self.get_serializer(page, many=True)

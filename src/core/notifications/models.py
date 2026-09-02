@@ -108,14 +108,20 @@ class Notification(models.Model):
     deleted_at = models.DateTimeField(
         blank=True,
         null=True,
-        verbose_name='Удалено в',
-        help_text='Мягкое удаление — скрыто из UI',
+        verbose_name='Отозвано в',
+        help_text='Отозвано системой / модулем — скрыто из UI (не удаление пользователем)',
     )
     sidebar_hidden_at = models.DateTimeField(
         blank=True,
         null=True,
         verbose_name='Скрыто из колокольчика',
         help_text='Не показывается в dropdown, остаётся в истории',
+    )
+    inbox_restored_at = models.DateTimeField(
+        blank=True,
+        null=True,
+        verbose_name='Восстановлено в inbox',
+        help_text='После «Из архива»: отсчёт автоархивации с этой даты, иначе с created_at',
     )
     created_at = models.DateTimeField(auto_now_add=True, db_index=True, verbose_name='Создано')
     read_at = models.DateTimeField(blank=True, null=True, verbose_name='Прочитано в')
@@ -200,6 +206,44 @@ class NotificationPreference(models.Model):
     def __str__(self):
         state = 'on' if self.enabled else 'off'
         return f'{self.user_id}:{self.source_module}.{self.event_key}[{self.channel}]={state}'
+
+
+class NotificationUserSettings(models.Model):
+    """Персональные настройки инбокса (не каналы доставки)."""
+
+    SIDEBAR_ACTIVITY_DAYS_MIN = 1
+    SIDEBAR_ACTIVITY_DAYS_MAX = 7
+    SIDEBAR_ACTIVITY_DAYS_DEFAULT = 3
+
+    AUTO_ARCHIVE_DAYS_PRESETS = (7, 14, 30, 60, 90)
+    AUTO_ARCHIVE_DAYS_DEFAULT = 14
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='core_notification_user_settings',
+        verbose_name='Пользователь',
+    )
+    sidebar_activity_days = models.PositiveSmallIntegerField(
+        default=SIDEBAR_ACTIVITY_DAYS_DEFAULT,
+        verbose_name='Активность в колокольчике (дней)',
+        help_text='Сколько дней держать прочитанные уведомления в колокольчике (1–7)',
+    )
+    auto_archive_days = models.PositiveSmallIntegerField(
+        default=AUTO_ARCHIVE_DAYS_DEFAULT,
+        verbose_name='Автоархив (дней)',
+        help_text='Через сколько дней прочитанные уходят в архив (7, 14, 30, 60, 90)',
+    )
+
+    class Meta:
+        verbose_name = 'Настройки инбокса уведомлений'
+        verbose_name_plural = 'Настройки инбокса уведомлений'
+
+    def __str__(self):
+        return (
+            f'user={self.user_id} sidebar_days={self.sidebar_activity_days} '
+            f'archive_days={self.auto_archive_days}'
+        )
 
 
 class NotificationEmailDelivery(models.Model):

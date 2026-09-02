@@ -12,7 +12,8 @@ import sys
 from pathlib import Path
 from typing import FrozenSet, List
 
-from src.config.settings.base import MODULES_DIR, SYSTEM_DIR
+# paths, не settings.base: `commands install` идёт до django-environ / poetry install.
+from src.config.paths import MODULES_DIR, SYSTEM_DIR
 
 _cached_catalog = None
 
@@ -73,7 +74,54 @@ def get_process_role() -> str:
 
 def get_process_filter_fingerprint() -> str:
     """Отпечаток фильтра процесса для кэша discovered_apps."""
-    return _get_catalog().process_filter_fingerprint()
+    base = _get_catalog().process_filter_fingerprint()
+    return f'{base};{_process_profile_fingerprint()}'
+
+
+def _process_profile_mod():
+    deployment = _deployment_dir()
+    if str(deployment) not in sys.path:
+        sys.path.insert(0, str(deployment))
+    from lifecycle.module_process_profile import (  # noqa: WPS433
+        allow_core_url_route,
+        filter_core_apps,
+        is_slim_module_process,
+        process_profile_fingerprint,
+    )
+
+    return filter_core_apps, is_slim_module_process, allow_core_url_route, process_profile_fingerprint
+
+
+def _process_profile_fingerprint() -> str:
+    try:
+        _filter, _slim, _url, fingerprint = _process_profile_mod()
+        return fingerprint(SYSTEM_DIR)
+    except Exception:
+        return ''
+
+
+def filter_core_apps_for_process(apps: list) -> list:
+    try:
+        filter_core_apps, _slim, _url, _fp = _process_profile_mod()
+        return filter_core_apps(apps, SYSTEM_DIR)
+    except Exception:
+        return list(apps)
+
+
+def is_slim_module_process() -> bool:
+    try:
+        _filter, is_slim, _url, _fp = _process_profile_mod()
+        return bool(is_slim())
+    except Exception:
+        return False
+
+
+def allow_core_url_route(route: str) -> bool:
+    try:
+        _filter, _slim, allow_route, _fp = _process_profile_mod()
+        return bool(allow_route(route))
+    except Exception:
+        return True
 
 
 def get_discovered_apps_cache_suffix() -> str:

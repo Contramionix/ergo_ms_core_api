@@ -11,11 +11,10 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Optional
 
-from src.config.settings.base import DJANGO_CORE_DIR, MODULES_DIR, VIRTUAL_ENV_DIR
+from src.config.paths import CACHE_DIR
+from src.config.settings.base import DJANGO_CORE_DIR, MODULES_DIR
 
 logger = logging.getLogger('utils')
-
-CACHE_DIR = VIRTUAL_ENV_DIR / 'cache'
 
 
 def _cache_file() -> Path:
@@ -32,57 +31,135 @@ def _cache_file() -> Path:
 # Обратная совместимость для импортов, ожидающих CACHE_FILE
 CACHE_FILE = CACHE_DIR / 'discovered_apps.bin'
 
+# Не обходим деревья, где apps.py / urls.py не бывают (на Windows rglob дороже кэша).
+SKIP_WALK_DIR_NAMES = frozenset({
+    '__pycache__',
+    'migrations',
+    '.git',
+    'node_modules',
+    'dist',
+    '.venv',
+    'virtual_env',
+})
 
-def _max_mtime_apps_py(root: Path) -> float:
-    """Max mtime всех apps.py в директории."""
+
+def _should_skip_walk_dir(name: str) -> bool:
+    return name in SKIP_WALK_DIR_NAMES or name.startswith('.')
+
+
+def max_mtime_named_narrow(root: Path, filename: str) -> float:
+    """Max mtime файла filename под root, без тяжёлых каталогов."""
     max_mtime = 0.0
+    root_s = os.fspath(root)
+    if not os.path.isdir(root_s):
+        return 0.0
     try:
-        for p in root.rglob('apps.py'):
-            if p.is_file():
-                try:
-                    max_mtime = max(max_mtime, p.stat().st_mtime)
-                except OSError:
-                    pass
+        for dirpath, dirnames, filenames in os.walk(root_s, topdown=True, followlinks=False):
+            dirnames[:] = [name for name in dirnames if not _should_skip_walk_dir(name)]
+            if filename not in filenames:
+                continue
+            try:
+                max_mtime = max(max_mtime, os.path.getmtime(os.path.join(dirpath, filename)))
+            except OSError:
+                pass
     except OSError:
         pass
     return max_mtime
 
 
-def _get_dirs_fingerprint() -> dict:
+def modules_named_mtime(modules_dir: Path, filename: str, *, under_api: bool) -> float:
     """
-    Fingerprint для проверки актуальности кэша discovered_apps.
-    Учитывает mtime директорий и всех apps.py — ловит добавление/изменение приложений.
-    Также включает DISABLED_MODULES — при изменении списка кэш инвалидируется.
+    mtime по modules/<name>/… без обхода client/ и submodule .git.
+
+    under_api=True — только modules/<name>/api/**/filename
+    under_api=False — modules/<name>/filename (integrations.yaml).
+    """
+    max_mtime = 0.0
+    root_s = os.fspath(modules_dir)
+    if not os.path.isdir(root_s):
+        return 0.0
+    try:
+        with os.scandir(root_s) as entries:
+            for entry in entries:
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+                if _should_skip_walk_dir(entry.name):
+                    continue
+                if under_api:
+                    api_path = os.path.join(entry.path, 'api')
+                    if os.path.isdir(api_path):
+                        max_mtime = max(max_mtime, max_mtime_named_narrow(Path(api_path), filename))
+                else:
+                    candidate = os.path.join(entry.path, filename)
+                    if os.path.isfile(candidate):
+                        try:
+                            max_mtime = max(max_mtime, os.path.getmtime(candidate))
+                        except OSError:
+                            pass
+    except OSError:
+        pass
+    return max_mtime
+
+
+def get_discovery_dirs_fingerprint() -> dict:
+    """
+    Fingerprint для кэша discovered_apps / discovered_urls.
+    Учитывает mtime директорий, apps.py и integrations.yaml.
+    Также включает DISABLED_MODULES, MICROSERVICE_MODULES и BRIDGE_SERVICE_URLS —
+    при изменении списка или карты соседей кэш инвалидируется.
     """
     result = {}
-    for name, path in [('core', DJANGO_CORE_DIR), ('modules', MODULES_DIR)]:
-        p = Path(path)
-        if p.exists():
-            try:
-                dir_mtime = p.stat().st_mtime
-                apps_mtime = _max_mtime_apps_py(p)
-                result[f'{name}_dir'] = dir_mtime
-                result[f'{name}_apps'] = max(dir_mtime, apps_mtime)
-            except OSError:
-                result[f'{name}_dir'] = 0
-                result[f'{name}_apps'] = 0
-        else:
-            result[f'{name}_dir'] = 0
-            result[f'{name}_apps'] = 0
+    core_path = Path(DJANGO_CORE_DIR)
+    modules_path = Path(MODULES_DIR)
+    if core_path.exists():
+        try:
+            dir_mtime = core_path.stat().st_mtime
+            apps_mtime = max_mtime_named_narrow(core_path, 'apps.py')
+            result['core_dir'] = dir_mtime
+            result['core_apps'] = max(dir_mtime, apps_mtime)
+        except OSError:
+            result['core_dir'] = 0
+            result['core_apps'] = 0
+    else:
+        result['core_dir'] = 0
+        result['core_apps'] = 0
+    if modules_path.exists():
+        try:
+            dir_mtime = modules_path.stat().st_mtime
+            apps_mtime = modules_named_mtime(modules_path, 'apps.py', under_api=True)
+            integrations_mtime = modules_named_mtime(
+                modules_path, 'integrations.yaml', under_api=False
+            )
+            result['modules_dir'] = dir_mtime
+            result['modules_apps'] = max(dir_mtime, apps_mtime, integrations_mtime)
+        except OSError:
+            result['modules_dir'] = 0
+            result['modules_apps'] = 0
+    else:
+        result['modules_dir'] = 0
+        result['modules_apps'] = 0
     result['disabled_modules'] = os.getenv('DISABLED_MODULES', '')
+    result['microservice_modules'] = os.getenv('MICROSERVICE_MODULES', '')
+    result['bridge_service_urls'] = os.getenv('BRIDGE_SERVICE_URLS', '')
     try:
         from src.core.utils.module_registry import get_process_filter_fingerprint
 
         result['process_filter'] = get_process_filter_fingerprint()
     except Exception:
         result['process_filter'] = ''
-    # Инвалидация кэша при смене алгоритма порядка module_requires
-    result['module_load_order'] = 1
+    # Инвалидация кэша при смене алгоритма порядка (integrations.yaml)
+    result['module_load_order'] = 3
+    # Узкий обход вместо Path.rglob
+    result['fingerprint_algo'] = 3
     return result
 
 
+def _get_dirs_fingerprint() -> dict:
+    return get_discovery_dirs_fingerprint()
+
+
 def _finalize_discovered_apps(apps: List[str]) -> List[str]:
-    """Топсорт модулей по AppConfig.module_requires."""
+    """Топсорт модулей по requires из integrations.yaml."""
     from src.core.utils.auto_api.module_load_order import sort_discovered_apps
 
     return sort_discovered_apps(apps)
@@ -102,7 +179,12 @@ def _collect_core_apps_fast() -> List[str]:
     """Собирает приложения из core/."""
     result: List[str] = []
     _recursively_find_apps_fast(str(DJANGO_CORE_DIR), 'src.core', result)
-    return result
+    try:
+        from src.core.utils.module_registry import filter_core_apps_for_process
+
+        return filter_core_apps_for_process(result)
+    except Exception:
+        return result
 
 
 def _collect_module_apps_fast() -> List[str]:
@@ -117,6 +199,8 @@ def _recursively_find_apps_fast(current_dir: str, base_module: str, installed_ap
     if not os.path.isdir(current_dir):
         return
     for app_name in os.listdir(current_dir):
+        if _should_skip_walk_dir(app_name):
+            continue
         app_path = os.path.join(current_dir, app_name)
         if os.path.isdir(app_path):
             module_path = f'{base_module}.{app_name}' if base_module else app_name
@@ -134,6 +218,8 @@ def _find_modules_apps_fast(modules_dir: str, installed_apps: list) -> None:
         is_valid_module_dir_name,
     )
     for module_name in os.listdir(modules_dir):
+        if _should_skip_walk_dir(module_name):
+            continue
         if not is_valid_module_dir_name(module_name):
             continue
         if not is_module_loadable_in_process(module_name):
@@ -166,6 +252,12 @@ def _run_discovery() -> List[str]:
     discoverer = ModuleDiscoverer()
     core_apps: List[str] = []
     discoverer._recursively_find_apps(str(DJANGO_CORE_DIR), 'src.core', core_apps)
+    try:
+        from src.core.utils.module_registry import filter_core_apps_for_process
+
+        core_apps = filter_core_apps_for_process(core_apps)
+    except Exception:
+        pass
     module_apps: List[str] = []
     discoverer._find_modules_apps(str(MODULES_DIR), module_apps)
     return _finalize_discovered_apps(core_apps + module_apps)
@@ -188,6 +280,12 @@ def invalidate_discovered_apps_cache() -> None:
             path.unlink(missing_ok=True)
         except OSError:
             logger.warning('Не удалось удалить %s', path, exc_info=True)
+    try:
+        from src.core.utils.auto_api.discovered_urls_cache import invalidate_discovered_urls_cache
+
+        invalidate_discovered_urls_cache()
+    except Exception:
+        logger.debug('invalidate discovered_urls skipped', exc_info=True)
 
 
 def get_discovered_apps(use_cache: Optional[bool] = None, fast_discovery: Optional[bool] = None) -> List[str]:

@@ -69,6 +69,16 @@ def get_all_permission_keys() -> Dict[str, str]:
     return dict(_get_cache()['all_keys'])
 
 
+def get_view_permission_pairs() -> set[tuple[str, str]]:
+    """Пары (module_name, permission_key) для прав просмотра из каталогов."""
+    pairs: set[tuple[str, str]] = set()
+    for module_name, catalog in _get_cache()['catalogs'].items():
+        for key in catalog.get('permissions') or {}:
+            if module_name and str(key).endswith('_view'):
+                pairs.add((module_name, str(key)))
+    return pairs
+
+
 def get_module_names() -> List[str]:
     """Список имён модулей, у которых есть каталог прав."""
     return list(_get_cache()['catalogs'].keys())
@@ -92,24 +102,152 @@ def _format_module_slug(module_name: str) -> str:
     return module_name.replace('-', ' ').replace('_', ' ').strip().title()
 
 
-def _resolve_module_label(module_name: str, catalog: Optional[Dict] = None) -> str:
-    """Человекочитаемое имя модуля: из каталога, AppConfig или slug."""
-    if catalog:
-        label = catalog.get('module_label')
-        if isinstance(label, str) and label.strip():
-            return label.strip()
+def _is_slug_like_module_label(module_name: str, label: str) -> bool:
+    """True если label — лишь title-case slug (Bi_Analysis / Bi Analysis), не заданное имя."""
+    normalized = (label or '').strip()
+    if not normalized or not module_name:
+        return True
+    key = module_name.strip()
+    if normalized == key:
+        return True
+    if normalized == key.title():
+        return True
+    if normalized.lower() == _format_module_slug(key).lower():
+        return True
+    return False
+
+
+_help_title_cache: Optional[Dict[str, str]] = None
+
+
+def _help_yaml_module_title(module_name: str) -> Optional[str]:
+    """Русский title из modules/<name>/ergoms.help.yaml (source locale)."""
+    global _help_title_cache
+    if _help_title_cache is None:
+        _help_title_cache = {}
+        try:
+            import yaml
+            from src.config.settings.base import MODULES_DIR
+        except Exception:
+            return None
+        if not MODULES_DIR.is_dir():
+            return None
+        for path in MODULES_DIR.glob('*/ergoms.help.yaml'):
+            try:
+                data = yaml.safe_load(path.read_text(encoding='utf-8')) or {}
+            except Exception:
+                continue
+            title = data.get('title')
+            if not isinstance(title, str) or not title.strip():
+                continue
+            title = title.strip()
+            _help_title_cache[path.parent.name] = title
+            mod = data.get('module')
+            if isinstance(mod, str) and mod.strip():
+                _help_title_cache[mod.strip()] = title
+    return _help_title_cache.get(module_name)
+
+
+def canonicalize_module_name(module_name: str) -> str:
+    """Свести вложенный label/сегмент к имени установленного модуля (child→parent по префиксу)."""
+    if not module_name:
+        return 'core'
+    key = module_name.strip()
+    if not key or key == 'core':
+        return 'core'
+
+    from src.config.settings.base import MODULES_DIR
+    from src.core.utils.module_registry import get_installed_module_names
+
+    installed = get_installed_module_names(include_disabled=True)
+    installed_set = set(installed)
+    if key in installed_set:
+        return key
+
+    for name in sorted(installed, key=len, reverse=True):
+        if key.startswith(f'{name}_') or key.startswith(f'{name}-'):
+            return name
 
     try:
         from django.apps import apps
 
-        app_config = apps.get_app_config(module_name)
-        verbose_name = getattr(app_config, 'verbose_name', None)
-        if isinstance(verbose_name, str) and verbose_name.strip():
-            return verbose_name.strip()
+        try:
+            cfg = apps.get_app_config(key)
+            parts = (getattr(cfg, 'name', '') or '').split('.')
+            if len(parts) >= 2 and parts[0] == 'modules' and parts[1] in installed_set:
+                return parts[1]
+        except LookupError:
+            pass
+
+        for cfg in apps.get_app_configs():
+            parts = (getattr(cfg, 'name', '') or '').split('.')
+            if (
+                len(parts) >= 2
+                and parts[0] == 'modules'
+                and parts[1] in installed_set
+                and (cfg.label == key or parts[-1] == key)
+            ):
+                return parts[1]
+    except Exception:
+        pass
+
+    if MODULES_DIR.is_dir():
+        for name in installed:
+            if (MODULES_DIR / name / 'api' / key).is_dir():
+                return name
+
+    return key
+
+
+def _app_config_verbose_name(module_name: str) -> Optional[str]:
+    """verbose_name AppConfig модуля (label или modules.<name>.api)."""
+    if not module_name or module_name == 'core':
+        return None
+
+    from django.apps import apps
+
+    candidates = []
+    try:
+        candidates.append(apps.get_app_config(module_name))
     except LookupError:
         pass
 
-    return _format_module_slug(module_name)
+    target = f'modules.{module_name}.api'
+    for app_config in apps.get_app_configs():
+        name = getattr(app_config, 'name', '') or ''
+        if name == target or name.startswith(f'{target}.'):
+            candidates.append(app_config)
+
+    for app_config in candidates:
+        verbose_name = getattr(app_config, 'verbose_name', None)
+        if isinstance(verbose_name, str) and verbose_name.strip():
+            # Пропускаем дефолт Django AppConfig: label.title() → Bi_Analysis
+            if not _is_slug_like_module_label(module_name, verbose_name):
+                return verbose_name.strip()
+    return None
+
+
+def _resolve_module_label(module_name: str, catalog: Optional[Dict] = None) -> str:
+    """Человекочитаемое имя модуля: каталог → help.yaml → AppConfig → slug."""
+    key = canonicalize_module_name(module_name)
+    if catalog is None:
+        catalogs = _get_cache().get('catalogs') or {}
+        catalog = catalogs.get(key)
+
+    if catalog:
+        label = catalog.get('module_label')
+        if isinstance(label, str) and label.strip() and not _is_slug_like_module_label(key, label):
+            return label.strip()
+
+    help_title = _help_yaml_module_title(key)
+    if help_title and not _is_slug_like_module_label(key, help_title):
+        return help_title
+
+    resolved = _app_config_verbose_name(key)
+    if resolved:
+        return resolved
+
+    return _format_module_slug(key)
 
 
 def _merge_stored_module_permissions(modules: List[Dict[str, Any]], *, disabled: FrozenSet[str]) -> None:
@@ -124,11 +262,12 @@ def _merge_stored_module_permissions(modules: List[Dict[str, Any]], *, disabled:
         .distinct()
     )
     for row in rows:
-        module_name = row['module_name']
+        module_name = canonicalize_module_name(row['module_name'] or '')
         if module_name not in by_name:
             by_name[module_name] = {
                 'module_name': module_name,
-                'module_label': _format_module_slug(module_name),
+                'module_label': _resolve_module_label(module_name),
+                'user_description': '',
                 'has_permission_catalog': False,
                 'permissions': {},
                 'disabled': module_name in disabled,
@@ -162,9 +301,16 @@ def get_modules_catalog(*, include_disabled: bool = False) -> List[Dict[str, Any
     for module_name in get_installed_module_names(include_disabled=include_disabled):
         catalog = permission_catalogs.get(module_name)
         permissions = dict(catalog.get('permissions', {})) if catalog else {}
+        raw_description = catalog.get('user_description') if catalog else None
+        user_description = (
+            raw_description.strip()
+            if isinstance(raw_description, str) and raw_description.strip()
+            else ''
+        )
         modules.append({
             'module_name': module_name,
             'module_label': _resolve_module_label(module_name, catalog),
+            'user_description': user_description,
             'has_permission_catalog': bool(catalog and catalog.get('permissions')),
             'permissions': permissions,
             'disabled': module_name in disabled,
@@ -175,6 +321,7 @@ def get_modules_catalog(*, include_disabled: bool = False) -> List[Dict[str, Any
 
 
 def clear_cache() -> None:
-    """Сбрасывает кеш (например, при горячей перезагрузке)."""
-    global _catalog_cache
+    """Сбрасывает кэш каталога прав и подписей модулей."""
+    global _catalog_cache, _help_title_cache
     _catalog_cache = None
+    _help_title_cache = None

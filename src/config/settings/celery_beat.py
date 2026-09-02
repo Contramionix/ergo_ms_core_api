@@ -92,6 +92,29 @@ if _client_monitoring_retention_days > 0:
         'schedule': crontab(hour=3, minute=45),
     }
 
+_session_device_retention_days = 0
+try:
+    from src.config.security_profile_runtime import session_device_retention_days as _sdrd
+
+    _session_device_retention_days = _sdrd()
+except Exception:
+    _session_device_retention_days = _env.int('API_SESSION_DEVICE_RETENTION_DAYS', default=0)
+if _session_device_retention_days > 0:
+    CELERY_BEAT_SCHEDULE['session-device-purge-old'] = {
+        'task': 'core.cms.adp.purge_old_devices',
+        'schedule': crontab(hour=4, minute=0),
+    }
+
+CELERY_BEAT_SCHEDULE['notifications-archive-stale-read'] = {
+    'task': 'core.notifications.archive_stale_read',
+    'schedule': crontab(hour=4, minute=15),
+}
+
+CELERY_BEAT_SCHEDULE['integrations-flush-outbox'] = {
+    'task': 'core.integrations.flush_outbox',
+    'schedule': 30.0,
+}
+
 # Дополнительные настройки Beat из модулей
 CELERY_BEAT_ADDITIONAL_CONFIG = beat_module_manager.get_additional_beat_configs()
 

@@ -59,17 +59,35 @@ def normalize_target_dir(target_dir: str | None) -> str:
     return normalized
 
 
+def _media_default_max() -> int:
+    return int(getattr(settings, 'MEDIA_UPLOAD_MAX_SIZE', 524288000))
+
+
+def _media_hard_max() -> int:
+    """Абсолютный потолок; модули могут запросить выше MEDIA_UPLOAD_MAX_SIZE, но не выше hard."""
+    default = _media_default_max()
+    hard = int(getattr(settings, 'MEDIA_UPLOAD_HARD_MAX_SIZE', 0) or 0)
+    if hard <= 0:
+        hard = default
+    return max(hard, default)
+
+
 def cap_max_size(requested: int | None) -> int:
-    limit = int(getattr(settings, 'MEDIA_UPLOAD_MAX_SIZE', 524288000))
+    """
+    Без max_size в токене — дефолт MEDIA_UPLOAD_MAX_SIZE.
+    С явным max_size — до MEDIA_UPLOAD_HARD_MAX_SIZE (модульный override выше дефолта).
+    """
+    default_limit = _media_default_max()
+    hard_limit = _media_hard_max()
     if requested is None:
-        return limit
+        return default_limit
     try:
         value = int(requested)
     except (TypeError, ValueError) as exc:
         raise ValidationError({'max_size': 'Некорректный max_size'}) from exc
     if value <= 0:
         raise ValidationError({'max_size': 'max_size должен быть положительным'})
-    return min(value, limit)
+    return min(value, hard_limit)
 
 
 def filter_allowed_types(requested: list | None) -> list[str] | None:

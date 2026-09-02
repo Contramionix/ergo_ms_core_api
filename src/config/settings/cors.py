@@ -9,13 +9,13 @@ Dev-origins собираются из _CORS_DEV_HOSTS и _CORS_DEV_PORTS (localh
 5173, 8001, 3000, 8080, 8000, 8003) и подставляются только при ERGO_ENV=development,
 если CORS_ALLOWED_ORIGINS и CORS_ALLOWED_ORIGIN_REGEXES не заданы.
 
-В production (и любом не-development режиме) нужен явный список origins и/или regexes;
-иначе запуск прерывается (ImproperlyConfigured).
+В production (и любом не-development режиме) список из .env не обязателен, если runtime
+уже знает публичный origin SPA: nginx (NGINX_PUBLIC_HOST / NGINX_SERVER_NAME /
+FRONTEND_BASE_URL) или, без nginx, непустой FRONTEND_BASE_URL. Localhost-порты
+разработки в production не подмешиваются. Если после этого список и regexes пусты —
+запуск прерывается (ImproperlyConfigured).
 
-При nginx перед Django в список дополнительно добавляется публичный origin прокси
-(см. effective_cors_origins), без подмешивания localhost в production.
-
-Для продакшена в .env задают:
+Явный список в .env по-прежнему предпочтителен:
   - CORS_ALLOWED_ORIGINS — полные origin'ы через запятую: https://app.example.com
   - или CORS_ALLOWED_ORIGIN_REGEXES — regex-шаблоны
 
@@ -54,12 +54,15 @@ elif CORS_ALLOWED_ORIGIN_REGEXES:
 elif is_development():
     _resolved_origins = list(_default_origins)
 else:
-    raise ImproperlyConfigured(
-        'В production (и любом не-development режиме) задайте CORS_ALLOWED_ORIGINS '
-        'или CORS_ALLOWED_ORIGIN_REGEXES. Список localhost подставляется только при '
-        'ERGO_ENV=development.'
-    )
+    _resolved_origins = []
 
 CORS_ALLOWED_ORIGINS = effective_cors_origins(_resolved_origins)
+
+if not CORS_ALLOWED_ORIGINS and not CORS_ALLOWED_ORIGIN_REGEXES:
+    raise ImproperlyConfigured(
+        'В production (и любом не-development режиме) задайте CORS_ALLOWED_ORIGINS '
+        'или CORS_ALLOWED_ORIGIN_REGEXES, либо FRONTEND_BASE_URL / публичный origin nginx. '
+        'Список localhost подставляется только при ERGO_ENV=development.'
+    )
 
 CORS_ALLOW_CREDENTIALS = True

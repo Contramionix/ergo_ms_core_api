@@ -73,10 +73,10 @@ class Command(BaseCommand):
         )
 
     def _download_once(self, url: str) -> Path:
-        from src.config.paths import VIRTUAL_ENV_DIR
+        from src.config.paths import CACHE_DIR
 
         suffix = Path(urlparse(url).path).suffix or '.gz'
-        tmp_root = VIRTUAL_ENV_DIR / 'cache' / 'tmp'
+        tmp_root = CACHE_DIR / 'tmp'
         tmp_root.mkdir(parents=True, exist_ok=True)
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix, dir=str(tmp_root))
         tmp_path = Path(tmp.name)
@@ -102,10 +102,10 @@ class Command(BaseCommand):
             raise
 
     def _extract_mmdb(self, archive_path: Path) -> Path:
-        from src.config.paths import VIRTUAL_ENV_DIR
+        from src.config.paths import CACHE_DIR
 
         suffixes = ''.join(archive_path.suffixes).lower()
-        tmp_root = VIRTUAL_ENV_DIR / 'cache' / 'tmp'
+        tmp_root = CACHE_DIR / 'tmp'
         tmp_root.mkdir(parents=True, exist_ok=True)
         extract_dir = Path(tempfile.mkdtemp(prefix='geoip_extract_', dir=str(tmp_root)))
         try:

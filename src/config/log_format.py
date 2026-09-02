@@ -15,14 +15,14 @@ DATEFMT = '%Y-%m-%d %H:%M:%S'
 
 # logging.Formatter / daphne --log-fmt / Celery worker_*_log_format (style='%')
 VERBOSE_FORMAT_PERCENT = '[%(levelname)s] %(asctime)s %(name)s %(module)s %(message)s'
-# Daphne basicConfig до Django: без module (как у root до полного record)
-DAPHNE_LOG_FMT = '[%(levelname)s] %(asctime)s %(name)s %(message)s'
+DAPHNE_LOG_FMT = VERBOSE_FORMAT_PERCENT
 
+# Тот же префикс, что verbose; processName / task_id — доп. поля worker.
 CELERY_WORKER_LOG_FORMAT = (
-    '[%(levelname)s] %(asctime)s %(processName)s %(message)s'
+    '[%(levelname)s] %(asctime)s %(name)s %(module)s %(processName)s %(message)s'
 )
 CELERY_WORKER_TASK_LOG_FORMAT = (
-    '[%(levelname)s] %(asctime)s %(processName)s '
+    '[%(levelname)s] %(asctime)s %(name)s %(module)s %(processName)s '
     '[%(task_name)s(%(task_id)s)] %(message)s'
 )
 

@@ -39,6 +39,10 @@
             <td style="padding:16px 32px;background-color:#f9fafb;border-top:1px solid #e5e7eb;">
               <p style="margin:0;color:#6b7280;font-size:12px;">
                 Это автоматическое уведомление системы ERGO MS. Настроить получение писем можно в разделе «Настройки → Уведомления».
+                {% if unsubscribe_url %}
+                <br>
+                <a href="{{ unsubscribe_url }}" style="color:#6b7280;">Отключить email-уведомления</a>
+                {% endif %}
               </p>
             </td>
           </tr>

@@ -26,6 +26,10 @@ SENSITIVE_KEY_PARTS = (
     'csrf',
     'otp',
     'code',
+    'passport',
+    'birth_date',
+    'birth_place',
+    'registration_address',
 )
 
 _MAX_DEPTH = 6

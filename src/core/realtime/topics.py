@@ -25,13 +25,10 @@ def messenger_topic(content_type_name: str, object_id: int) -> str:
     return f'messenger:{content_type_name}:{object_id}'
 
 
-def parse_messenger_topic(topic: str) -> tuple[str, int] | None:
+def parse_messenger_topic(topic: str) -> tuple[str, str] | None:
     if not topic.startswith('messenger:'):
         return None
     parts = topic.split(':', 2)
-    if len(parts) != 3:
+    if len(parts) != 3 or not parts[1] or not parts[2]:
         return None
-    try:
-        return parts[1], int(parts[2])
-    except (TypeError, ValueError):
-        return None
+    return parts[1], parts[2]

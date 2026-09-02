@@ -28,6 +28,7 @@ from ergo_modes import (  # noqa: E402
     effective_docker_enabled,
     effective_email_enabled,
     effective_jupyter_access_mode,
+    effective_jupyter_behind_nginx,
     effective_jupyter_enabled,
     effective_media_access_mode,
     effective_nginx_enabled,
@@ -74,6 +75,8 @@ def _env_mapping() -> dict[str, str]:
         'API_CACHE_BACKEND',
         'CHANNEL_LAYER_BACKEND',
         'API_JUPYTER_ACCESS_MODE',
+        'API_JUPYTER_BEHIND_NGINX',
+        'API_JUPYTER_ALLOW_REMOTE',
     )
     values: dict[str, str] = {}
     for key in keys:
@@ -159,6 +162,10 @@ def jupyter_access_mode_from_ergo() -> str | None:
     return effective_jupyter_access_mode(_env_mapping())
 
 
+def jupyter_behind_nginx_mode() -> bool:
+    return effective_jupyter_behind_nginx(_env_mapping())
+
+
 def email_mode_enabled() -> bool:
     return effective_email_enabled(_env_mapping())
 
@@ -205,6 +212,7 @@ __all__ = [
     'docker_enabled',
     'email_mode_enabled',
     'jupyter_access_mode_from_ergo',
+    'jupyter_behind_nginx_mode',
     'jupyter_mode_enabled',
     'media_access_mode',
     'media_api_deploy_type',

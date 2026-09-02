@@ -4,13 +4,15 @@
 """
 
 from src.config.env import env
+from src.config.security_profile_runtime import password_min_length
 
 
 def _env_bool(name: str, default: bool) -> bool:
     return env.bool(name, default=default)
 
 
-PASSWORD_MIN_LENGTH = env.int('API_PASSWORD_MIN_LENGTH', default=8)
+# Unset → профиль ERGO_SECURITY (standard: 8, open: 6)
+PASSWORD_MIN_LENGTH = password_min_length()
 PASSWORD_MAX_LENGTH = env.int('API_PASSWORD_MAX_LENGTH', default=128)
 PASSWORD_REQUIRE_LOWERCASE = _env_bool('API_PASSWORD_REQUIRE_LOWERCASE', True)
 PASSWORD_REQUIRE_UPPERCASE = _env_bool('API_PASSWORD_REQUIRE_UPPERCASE', False)

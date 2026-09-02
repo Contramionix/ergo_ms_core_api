@@ -12,13 +12,15 @@ from dataclasses import dataclass
 from django.core.mail import EmailMultiAlternatives
 
 from src.core.utils.smtp_errors import format_smtp_error
+from src.core.utils.smtp_local_hostname import apply_django_smtp_helo_override
 from src.core.utils.smtp_resolver import (
     EMAIL_DISABLED_MESSAGE,
     is_email_enabled,
     resolve_connection_and_from,
 )
+from src.core.utils.transactional_email_headers import apply_transactional_email_headers
 
-from .email_templates import EmailTemplateResolver, RenderedEmail
+from .email_templates import EmailTemplateResolver, RenderedEmail, resolve_unsubscribe_url
 
 logger = logging.getLogger('core.notifications')
 
@@ -51,12 +53,19 @@ class MailService:
             return SendResult(success=False, error=f'Ошибка рендера шаблона: {exc}')
 
         try:
+            apply_django_smtp_helo_override()
+            sender = rendered.from_email or from_email
             message = EmailMultiAlternatives(
                 subject=rendered.subject,
                 body=rendered.text_body,
-                from_email=rendered.from_email or from_email,
+                from_email=sender,
                 to=[recipient_email],
                 connection=connection,
+            )
+            apply_transactional_email_headers(
+                message,
+                from_email=sender,
+                unsubscribe_url=resolve_unsubscribe_url(),
             )
             message.attach_alternative(rendered.html_body, 'text/html')
             message.send(fail_silently=False)

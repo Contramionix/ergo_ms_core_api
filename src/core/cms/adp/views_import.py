@@ -5,8 +5,7 @@ import os
 from django.http import HttpResponse
 from django.utils import timezone
 from django.utils.translation import gettext as _
-from drf_yasg import openapi
-from drf_yasg.utils import swagger_auto_schema
+from src.core.utils.swagger.yasg_compat import swagger_auto_schema, openapi
 from rest_framework import status
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response

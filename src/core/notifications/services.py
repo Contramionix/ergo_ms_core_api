@@ -1,25 +1,69 @@
 import logging
-from typing import Any
+import re
+from datetime import timedelta
+from typing import Any, Iterable
 
 from django.contrib.auth import get_user_model
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from src.core.integrations import bridge
+from src.core.realtime.hub import RealtimeHub
+from src.core.realtime.topics import notifications_user_group, notifications_user_topic
 
 from .channels_ import get_channels
-from .models import Notification
+from .models import Notification, NotificationUserSettings
 from .navigation_validation import sanitize_notification_navigation, validate_notification_navigation
-from .preferences import PreferenceResolver
+from .preferences import PreferenceResolver, clamp_auto_archive_days
 from .unread_cache import (
     get_cached_unread_count,
     invalidate_unread_count_cache,
     set_cached_unread_count,
 )
 
+STALE_READ_ARCHIVE_DAYS = NotificationUserSettings.AUTO_ARCHIVE_DAYS_DEFAULT
+
 logger = logging.getLogger('core.notifications')
 
 User = get_user_model()
+
+_HANDLER_NAME_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$')
+_FORBIDDEN_HANDLER_PREFIXES = (
+    'adp.',
+    'core.',
+    'session.',
+    'audit.',
+    'menu.',
+    'media.',
+    'notifications.',
+)
+
+
+def is_allowed_notification_action_handler(handler: str) -> bool:
+    """True, если handler — dotted-имя и не привилегированная операция ядра."""
+    if not isinstance(handler, str):
+        return False
+    name = handler.strip()
+    if not name or not _HANDLER_NAME_RE.fullmatch(name):
+        return False
+    return not name.startswith(_FORBIDDEN_HANDLER_PREFIXES)
+
+
+def _sanitize_notification_actions(actions: list) -> list:
+    cleaned = []
+    for item in actions:
+        if not isinstance(item, dict):
+            continue
+        handler = item.get('handler') or ''
+        if handler and not is_allowed_notification_action_handler(handler):
+            logger.warning(
+                'NotificationService.dispatch: отклонён handler %r',
+                handler,
+            )
+            continue
+        cleaned.append(item)
+    return cleaned
 
 
 def _resolve_recipient(recipient: Any):
@@ -90,7 +134,7 @@ class NotificationService:
             )
             return None
 
-        action_list = actions if isinstance(actions, list) else []
+        action_list = _sanitize_notification_actions(actions) if isinstance(actions, list) else []
         defaults = {
             'title': title,
             'body': body or '',
@@ -222,9 +266,80 @@ class NotificationService:
         if notif is None:
             return None
         if notif.archived_at is not None:
+            now = timezone.now()
             notif.archived_at = None
-            notif.save(update_fields=['archived_at'])
+            notif.inbox_restored_at = now
+            notif.save(update_fields=['archived_at', 'inbox_restored_at'])
         return notif
+
+    @staticmethod
+    def _archive_stale_read_for_recipients(*, recipient_ids, older_than_days: int, now) -> int:
+        if older_than_days <= 0 or not recipient_ids:
+            return 0
+        cutoff = now - timedelta(days=older_than_days)
+        qs = Notification.objects.filter(
+            recipient_id__in=recipient_ids,
+            is_read=True,
+            in_app_visible=True,
+            archived_at__isnull=True,
+            deleted_at__isnull=True,
+        ).filter(
+            Q(inbox_restored_at__isnull=True, created_at__lt=cutoff)
+            | Q(inbox_restored_at__lt=cutoff)
+        )
+        return qs.update(archived_at=now)
+
+    @classmethod
+    def archive_stale_read(cls, *, older_than_days: int | None = None) -> int:
+        """Автоархивация прочитанных по per-user сроку (или одному older_than_days)."""
+        now = timezone.now()
+
+        if older_than_days is not None:
+            if older_than_days <= 0:
+                return 0
+            cutoff = now - timedelta(days=older_than_days)
+            return Notification.objects.filter(
+                is_read=True,
+                in_app_visible=True,
+                archived_at__isnull=True,
+                deleted_at__isnull=True,
+            ).filter(
+                Q(inbox_restored_at__isnull=True, created_at__lt=cutoff)
+                | Q(inbox_restored_at__lt=cutoff)
+            ).update(archived_at=now)
+
+        by_days: dict[int, list[int]] = {}
+        configured_ids: list[int] = []
+        for user_id, days in NotificationUserSettings.objects.values_list(
+            'user_id', 'auto_archive_days',
+        ):
+            clamped = clamp_auto_archive_days(days)
+            by_days.setdefault(clamped, []).append(user_id)
+            configured_ids.append(user_id)
+
+        total = 0
+        for days, user_ids in by_days.items():
+            total += cls._archive_stale_read_for_recipients(
+                recipient_ids=user_ids,
+                older_than_days=days,
+                now=now,
+            )
+
+        default_days = STALE_READ_ARCHIVE_DAYS
+        qs = Notification.objects.filter(
+            is_read=True,
+            in_app_visible=True,
+            archived_at__isnull=True,
+            deleted_at__isnull=True,
+        )
+        if configured_ids:
+            qs = qs.exclude(recipient_id__in=configured_ids)
+        cutoff = now - timedelta(days=default_days)
+        total += qs.filter(
+            Q(inbox_restored_at__isnull=True, created_at__lt=cutoff)
+            | Q(inbox_restored_at__lt=cutoff)
+        ).update(archived_at=now)
+        return total
 
     @staticmethod
     def hide_from_sidebar(notification_id: int, user) -> Notification | None:
@@ -246,21 +361,73 @@ class NotificationService:
         return notif
 
     @staticmethod
-    def soft_delete(notification_id: int, user) -> bool:
-        notif = NotificationService._get_owned(notification_id, user)
-        if notif is None:
-            return False
-        was_unread = not notif.is_read and notif.archived_at is None
-        notif.deleted_at = timezone.now()
-        if not notif.is_read:
-            notif.is_read = True
-            notif.read_at = notif.deleted_at
-            notif.save(update_fields=['deleted_at', 'is_read', 'read_at'])
-        else:
-            notif.save(update_fields=['deleted_at'])
-        if was_unread:
-            invalidate_unread_count_cache(user.pk)
-        return True
+    def recall(
+        *,
+        idempotency_key: str | None = None,
+        idempotency_keys: Iterable[str] | None = None,
+    ) -> int:
+        """Отозвать уведомления по idempotency_key (модуль / система, не пользователь)."""
+        keys: list[str] = []
+        if idempotency_key and isinstance(idempotency_key, str):
+            key = idempotency_key.strip()
+            if key:
+                keys.append(key)
+        if idempotency_keys:
+            for item in idempotency_keys:
+                if isinstance(item, str):
+                    key = item.strip()
+                    if key and key not in keys:
+                        keys.append(key)
+        if not keys:
+            return 0
+
+        now = timezone.now()
+        qs = Notification.objects.filter(
+            idempotency_key__in=keys,
+            deleted_at__isnull=True,
+        )
+        recipients_unread: set[int] = set()
+        revoked: list[Notification] = []
+        for notif in qs.iterator():
+            was_unread = not notif.is_read and notif.archived_at is None
+            notif.deleted_at = now
+            update_fields = ['deleted_at']
+            if not notif.is_read:
+                notif.is_read = True
+                notif.read_at = now
+                update_fields.extend(['is_read', 'read_at'])
+            notif.save(update_fields=update_fields)
+            if was_unread:
+                recipients_unread.add(notif.recipient_id)
+            revoked.append(notif)
+
+        for user_id in recipients_unread:
+            invalidate_unread_count_cache(user_id)
+
+        for notif in revoked:
+            NotificationService._publish_revoked(notif)
+
+        return len(revoked)
+
+    @staticmethod
+    def _publish_revoked(notification: Notification) -> None:
+        try:
+            user_id = notification.recipient_id
+            RealtimeHub.publish(
+                group=notifications_user_group(user_id),
+                topic=notifications_user_topic(user_id),
+                event_type='notification_revoked',
+                payload={
+                    'id': notification.pk,
+                    'idempotency_key': notification.idempotency_key or '',
+                    'deleted_at': notification.deleted_at.isoformat() if notification.deleted_at else None,
+                },
+            )
+        except Exception:
+            logger.exception(
+                'Не удалось отправить realtime об отзыве уведомления #%s',
+                notification.pk,
+            )
 
     @staticmethod
     @transaction.atomic
@@ -288,7 +455,7 @@ class NotificationService:
             return {'success': False, 'error': 'invalid_action'}
 
         handler = action_def.get('handler') or ''
-        if not handler or not bridge.has(handler):
+        if not is_allowed_notification_action_handler(handler) or not bridge.has(handler):
             logger.warning(
                 'NotificationService.execute_action: handler %r не зарегистрирован',
                 handler,

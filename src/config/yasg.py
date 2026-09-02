@@ -1,11 +1,6 @@
-"""
-Файл для настройки маршрутов документации Django-API с использованием библиотеки drf-yasg.
+"""Маршруты OpenAPI (drf-spectacular): JSON/YAML, Swagger UI и ReDoc."""
 
-Он создает представление схемы API, используя информацию из переменных окружения,
-и определяет маршруты для доступа к документации в форматах JSON, YAML, Swagger UI и ReDoc.
-"""
-
-from django.urls import re_path
+from django.urls import path
 
 from src.config.settings.swagger import SWAGGER_ENABLED
 
@@ -15,38 +10,40 @@ urlpatterns = []
 if SWAGGER_ENABLED:
     from rest_framework.permissions import AllowAny
     from rest_framework_simplejwt.authentication import JWTAuthentication
-
-    from drf_yasg.views import get_schema_view
-    from drf_yasg import openapi
-
-    system_title = 'ERGO MS'
-
-    schema_view = get_schema_view(
-        openapi.Info(
-            title=f'{system_title} API',
-            default_version='v2.1',
-            description='API эргономичной системы',
-            terms_of_service='https://www.google.com/policies/terms/',
-        ),
-        public=True,
-        permission_classes=(AllowAny,),
-        authentication_classes=[JWTAuthentication],
+    from drf_spectacular.views import (
+        SpectacularAPIView,
+        SpectacularRedocView,
+        SpectacularSwaggerView,
+        SpectacularYAMLAPIView,
     )
 
+    class SpectacularJSONView(SpectacularAPIView):
+        permission_classes = (AllowAny,)
+        authentication_classes = [JWTAuthentication]
+
+    class SpectacularYAMLView(SpectacularYAMLAPIView):
+        permission_classes = (AllowAny,)
+        authentication_classes = [JWTAuthentication]
+
+    class SpectacularSwaggerUiView(SpectacularSwaggerView):
+        permission_classes = (AllowAny,)
+        authentication_classes = [JWTAuthentication]
+
+    class SpectacularRedocUiView(SpectacularRedocView):
+        permission_classes = (AllowAny,)
+        authentication_classes = [JWTAuthentication]
+
     urlpatterns = [
-        re_path(
-            r'^swagger(?P<format>\.json|\.yaml)$',
-            schema_view.without_ui(cache_timeout=0),
-            name='schema-json',
-        ),
-        re_path(
-            r'^swagger/$',
-            schema_view.with_ui('swagger', cache_timeout=0),
+        path('swagger.json', SpectacularJSONView.as_view(), name='schema-json'),
+        path('swagger.yaml', SpectacularYAMLView.as_view(), name='schema-yaml'),
+        path(
+            'swagger/',
+            SpectacularSwaggerUiView.as_view(url_name='schema-json'),
             name='schema-swagger-ui',
         ),
-        re_path(
-            r'^redoc/$',
-            schema_view.with_ui('redoc', cache_timeout=0),
+        path(
+            'redoc/',
+            SpectacularRedocUiView.as_view(url_name='schema-json'),
             name='schema-redoc',
         ),
     ]

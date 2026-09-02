@@ -83,9 +83,13 @@ class PasswordResetService:
         return (purpose or '').strip().lower() == PasswordResetService.PURPOSE_PASSWORD_RESET
 
     @staticmethod
-    def _code_ttl() -> timedelta:
+    def get_code_ttl_minutes() -> int:
         minutes = int(getattr(settings, 'PASSWORD_RESET_CODE_TTL_MINUTES', 15) or 15)
-        return timedelta(minutes=max(1, minutes))
+        return max(1, minutes)
+
+    @staticmethod
+    def _code_ttl() -> timedelta:
+        return timedelta(minutes=PasswordResetService.get_code_ttl_minutes())
 
     @staticmethod
     def _max_attempts() -> int:

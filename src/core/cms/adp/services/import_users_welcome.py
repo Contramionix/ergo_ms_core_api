@@ -4,12 +4,17 @@ from __future__ import annotations
 
 from typing import Optional, Tuple
 
-from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.utils.translation import gettext as _
 
 User = get_user_model()
-from src.core.utils.plain_mail import normalize_recipient_email, send_plain_email
+from src.core.cms.adp.services.auth_mail_compose import (
+    ComposedAuthEmail,
+    compose_via_optional_op,
+    frontend_login_url,
+)
+from src.core.integrations.module_contracts import CORE_COMPOSE_IMPORT_WELCOME_DEFAULTS
+from src.core.utils.plain_mail import send_plain_email
 
 DEFAULT_WELCOME_SUBJECT = 'Добро пожаловать в ERGO MS'
 
@@ -43,17 +48,28 @@ class ImportWelcomeEmailError(Exception):
         super().__init__(message)
 
 
+def compose_import_welcome_defaults() -> ComposedAuthEmail:
+    default = ComposedAuthEmail(subject=DEFAULT_WELCOME_SUBJECT, body=DEFAULT_WELCOME_BODY)
+    return compose_via_optional_op(
+        CORE_COMPOSE_IMPORT_WELCOME_DEFAULTS,
+        default,
+        default_subject=default.subject,
+        default_body=default.body,
+        login_url=frontend_login_url(),
+    )
+
+
 def get_welcome_email_defaults() -> dict:
+    composed = compose_import_welcome_defaults()
     return {
-        'subject': DEFAULT_WELCOME_SUBJECT,
-        'body': DEFAULT_WELCOME_BODY,
+        'subject': composed.subject,
+        'body': composed.body,
         'placeholders': WELCOME_PLACEHOLDERS,
     }
 
 
 def build_login_url() -> str:
-    base_url = getattr(settings, 'FRONTEND_BASE_URL', 'http://localhost:8001').rstrip('/')
-    return f'{base_url}/login'
+    return frontend_login_url()
 
 
 def _build_full_name(user: User) -> str:
@@ -70,8 +86,9 @@ def normalize_welcome_templates(
     subject: Optional[str],
     body: Optional[str],
 ) -> tuple[str, str]:
-    normalized_subject = (subject or '').strip() or DEFAULT_WELCOME_SUBJECT
-    normalized_body = (body or '').strip() or DEFAULT_WELCOME_BODY
+    fallback = compose_import_welcome_defaults()
+    normalized_subject = (subject or '').strip() or fallback.subject
+    normalized_body = (body or '').strip() or fallback.body
 
     if len(normalized_subject) > MAX_SUBJECT_LENGTH:
         raise ImportWelcomeEmailError(

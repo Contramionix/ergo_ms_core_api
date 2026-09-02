@@ -25,19 +25,37 @@ from src.core.system.runtime_warmup import warmup_runtime_connections
 
 warmup_runtime_connections()
 
-from channels.auth import AuthMiddlewareStack
-from channels.routing import ProtocolTypeRouter, URLRouter
-from channels.security.websocket import AllowedHostsOriginValidator
+from asgiref.sync import ThreadSensitiveContext
 
-from src.core.messenger.routing import websocket_urlpatterns as messenger_ws
-from src.core.notifications.routing import websocket_urlpatterns as notifications_ws
-from src.core.cms.adp.routing import websocket_urlpatterns as adp_ws
+from src.core.utils.module_registry import is_slim_module_process
 
-application = ProtocolTypeRouter({
-    "http": django_asgi_app,
-    "websocket": AllowedHostsOriginValidator(
-        AuthMiddlewareStack(
-            URLRouter(messenger_ws + notifications_ws + adp_ws)
+
+async def http_application(scope, receive, send):
+    """Каждый HTTP-запрос — свой thread-sensitive executor (параллельные sync-вьюхи)."""
+    async with ThreadSensitiveContext():
+        await django_asgi_app(scope, receive, send)
+
+
+if is_slim_module_process():
+    application = http_application
+else:
+    from channels.auth import AuthMiddlewareStack
+    from channels.routing import ProtocolTypeRouter, URLRouter
+    from channels.security.websocket import AllowedHostsOriginValidator
+
+    from src.core.cms.adp.routing import websocket_urlpatterns as adp_ws
+    from src.core.messenger.routing import websocket_urlpatterns as messenger_ws
+    from src.core.notifications.routing import websocket_urlpatterns as notifications_ws
+    from src.core.realtime.transport import is_websocket_transport
+
+    _protocol_apps = {
+        "http": http_application,
+    }
+    if is_websocket_transport():
+        _protocol_apps["websocket"] = AllowedHostsOriginValidator(
+            AuthMiddlewareStack(
+                URLRouter(messenger_ws + notifications_ws + adp_ws)
+            )
         )
-    ),
-})
+
+    application = ProtocolTypeRouter(_protocol_apps)

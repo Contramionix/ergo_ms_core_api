@@ -11,19 +11,18 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from _common import API_DIR, PROJECT_ROOT, format_console
 
 _DEPLOYMENT_DIR = PROJECT_ROOT / 'core' / 'deployment'
-if str(_DEPLOYMENT_DIR) not in sys.path:
-    sys.path.insert(0, str(_DEPLOYMENT_DIR))
+_SCRIPTS_DIR = _DEPLOYMENT_DIR / 'scripts'
+for _path in (_DEPLOYMENT_DIR, _SCRIPTS_DIR):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
 
-from project_layout import (  # noqa: E402
-    ensure_dir,
-    jupyter_dir,
-    jupyter_kernels_dir,
-)
+from project_layout import ensure_dir, jupyter_dir  # noqa: E402
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 KERNEL_NAME = 'ergo_django'
@@ -32,8 +31,22 @@ KERNEL_LAUNCHER = SCRIPT_DIR / 'jupyter_django_kernel.py'
 NOTEBOOKS_DIR = PROJECT_ROOT / 'notebooks'
 
 
+def _jupyter_data_dir() -> Path:
+    explicit = (os.environ.get('JUPYTER_DATA_DIR') or '').strip()
+    if explicit:
+        return Path(explicit)
+    return jupyter_dir(PROJECT_ROOT)
+
+
+def _notebooks_dir() -> Path:
+    explicit = (os.environ.get('JUPYTER_NOTEBOOKS_DIR') or '').strip()
+    if explicit:
+        return Path(explicit)
+    return NOTEBOOKS_DIR
+
+
 def _install_django_kernel():
-    """Создаёт Django-aware IPython kernel spec в virtual_env/jupyter/kernels."""
+    """Создаёт Django-aware IPython kernel spec в JUPYTER_DATA_DIR/kernels."""
     python_exe = sys.executable.replace('\\', '/')
     launcher_path = str(KERNEL_LAUNCHER).replace('\\', '/')
 
@@ -46,7 +59,7 @@ def _install_django_kernel():
         },
     }
 
-    dest = ensure_dir(jupyter_kernels_dir(PROJECT_ROOT) / KERNEL_NAME)
+    dest = ensure_dir(_jupyter_data_dir() / 'kernels' / KERNEL_NAME)
     kernel_json_path = dest / 'kernel.json'
     kernel_json_path.write_text(
         json.dumps(kernel_spec, indent=2, ensure_ascii=False) + '\n',
@@ -61,7 +74,11 @@ def _ensure_venv_commonjs():
     не наследовал "type": "module" из package.json корня или virtual_env/npm.
     Без этого JupyterLab's node-version-check.js падает с ReferenceError
     т.к. require() недоступен в ESM-контексте.
+
+    Если задан JUPYTER_DATA_DIR (изолированный прогон), проектный virtual_env не трогаем.
     """
+    if (os.environ.get('JUPYTER_DATA_DIR') or '').strip():
+        return
     venv_pkg = PROJECT_ROOT / 'virtual_env' / 'package.json'
     if not venv_pkg.exists():
         venv_pkg.parent.mkdir(parents=True, exist_ok=True)
@@ -111,35 +128,81 @@ def _start_jupyterlab():
     """Запускает JupyterLab с effective-настройками."""
     from src.config.jupyter_runtime import build_jupyter_server_argv, validate_jupyter_startup
 
+    try:
+        import jupyterlab  # noqa: F401
+    except ImportError:
+        print(
+            format_console(
+                'error',
+                'JupyterLab не установлен. Выполните: ergoms python-install --with jupyter',
+            ),
+            file=sys.stderr,
+        )
+        return 1
+
     startup_error = validate_jupyter_startup()
     if startup_error:
         print(format_console('error', startup_error), file=sys.stderr)
         return 1
 
-    NOTEBOOKS_DIR.mkdir(parents=True, exist_ok=True)
+    notebooks = _notebooks_dir()
+    notebooks.mkdir(parents=True, exist_ok=True)
     _ensure_venv_commonjs()
 
-    data_dir = ensure_dir(jupyter_dir(PROJECT_ROOT))
-    cmd = [sys.executable, '-m', 'jupyterlab', *build_jupyter_server_argv(str(NOTEBOOKS_DIR))]
+    data_dir = ensure_dir(_jupyter_data_dir())
+    cmd = [sys.executable, '-m', 'jupyterlab', *build_jupyter_server_argv(str(notebooks))]
 
     print(format_console('info', 'Запуск JupyterLab...'))
-    print(format_console('info', f'Каталог блокнотов: {NOTEBOOKS_DIR}'))
+    print(format_console('info', f'Каталог блокнотов: {notebooks}'))
     _print_startup_info()
 
     env = os.environ.copy()
     existing_pythonpath = env.get('PYTHONPATH', '')
-    env['PYTHONPATH'] = str(PROJECT_ROOT) + (os.pathsep + existing_pythonpath if existing_pythonpath else '')
+    parts = [item for item in existing_pythonpath.split(os.pathsep) if item]
+    root_s = str(PROJECT_ROOT)
+    if root_s not in parts:
+        parts.append(root_s)
+    env['PYTHONPATH'] = os.pathsep.join(parts)
     env['JUPYTER_DATA_DIR'] = str(data_dir)
     env['JUPYTER_PATH'] = str(data_dir)
 
+    from log_env import log_file_path
+
+    log_path = log_file_path('JUPYTER', PROJECT_ROOT)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_handle = open(log_path, 'a', encoding='utf-8', buffering=1)
+    log_handle.write(
+        f'\n--- jupyter start {time.strftime("%Y-%m-%d %H:%M:%S")} ---\n'
+    )
+    log_handle.flush()
+    proc = None
     try:
-        proc = subprocess.Popen(cmd, env=env)
+        proc = subprocess.Popen(
+            cmd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+        )
+        if proc.stdout:
+            for line in proc.stdout:
+                log_handle.write(line)
+                log_handle.flush()
+                print(line, end='')
         proc.wait()
         return proc.returncode or 0
     except KeyboardInterrupt:
-        proc.terminate()
-        proc.wait()
+        if proc is not None:
+            proc.terminate()
+            proc.wait()
         return 0
+    finally:
+        try:
+            log_handle.close()
+        except OSError:
+            pass
 
 
 def main():

@@ -25,6 +25,9 @@ LEAN_SCHEMA_COMMANDS = frozenset({
     'showmigrations',
     'sqlmigrate',
     'squashmigrations',
+    'migrate_module',
+    'move_module_schema',
+    'move_core_schema',
 })
 
 ENV_FLAG = 'ERGO_LEAN_DJANGO_CLI'
@@ -97,3 +100,29 @@ def prepare_lean_schema_django() -> None:
         return
     mark_lean_schema_cli()
     install_lean_module_ready_guard()
+
+
+def prepare_celery_for_django() -> None:
+    """
+    Вызывать до ``django.setup()`` в CLI (``ergoms api`` / ``manage.py``).
+
+    Иначе ``@shared_task`` при загрузке apps цепляется к анонимному
+    ``Celery("default")`` с ``amqp://localhost``, а брокер из настроек Django
+    не применяется. API делает то же явно в ``asgi.py`` / ``wsgi.py``.
+    """
+    from src.config.celery import celery_app as _celery_app  # noqa: F401
+    from src.config.celery import ensure_django_celery_configured
+    import django
+    from django.conf import settings as django_settings
+
+    original_setup = django.setup
+    if not getattr(original_setup, '_ergo_celery_after_setup', False):
+        def setup(*args, **kwargs):
+            original_setup(*args, **kwargs)
+            ensure_django_celery_configured()
+
+        setup._ergo_celery_after_setup = True  # type: ignore[attr-defined]
+        django.setup = setup
+
+    if django_settings.configured:
+        ensure_django_celery_configured()

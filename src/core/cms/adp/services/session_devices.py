@@ -1,3 +1,5 @@
+import logging
+
 from django.contrib.auth import get_user_model
 
 User = get_user_model()
@@ -5,6 +7,8 @@ from django.core.cache import cache
 
 from src.config.env import env
 from src.core.cms.adp.models import UserDevice
+
+logger = logging.getLogger('cms.adp.session')
 
 _DEVICE_SESSION_CACHE_TTL_SECONDS = env.int('API_DEVICE_SESSION_CACHE_TTL', default=45)
 _DEVICE_ACTIVITY_DEBOUNCE_SECONDS = env.int('API_DEVICE_ACTIVITY_DEBOUNCE_SEC', default=120)
@@ -51,7 +55,7 @@ def blacklist_refresh_jti(user: User, jti: str | None) -> None:
     except OutstandingToken.DoesNotExist:
         pass
     except Exception:
-        pass
+        logger.exception('Не удалось занести refresh jti в чёрный список')
 
 
 def bind_device_to_refresh_token(device: UserDevice, refresh_token) -> None:
@@ -82,7 +86,7 @@ def revoke_user_device_session(device: UserDevice) -> None:
 
 
 def _payload_from_refresh_string(raw: str | None) -> dict | None:
-    """Claims refresh-токена; для истёкшего — decode без проверки exp."""
+    """Claims refresh-токена. Подпись обязательна; для истёкшего не проверяем exp."""
     if not raw:
         return None
     from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
@@ -93,8 +97,23 @@ def _payload_from_refresh_string(raw: str | None) -> dict | None:
     except (TokenError, InvalidToken):
         pass
     try:
+        import jwt
+
         backend = RefreshToken.get_token_backend()
-        return backend.decode(raw, verify=False)
+        verifying_key = backend.get_verifying_key(raw)
+        return jwt.decode(
+            raw,
+            verifying_key,
+            algorithms=[backend.algorithm],
+            audience=backend.audience,
+            issuer=backend.issuer,
+            leeway=getattr(backend, 'leeway', 0),
+            options={
+                'verify_signature': True,
+                'verify_exp': False,
+                'verify_aud': backend.audience is not None,
+            },
+        )
     except Exception:
         return None
 
@@ -155,12 +174,12 @@ def revoke_logout_session(request) -> None:
             except (AttributeError, TokenError, InvalidToken):
                 pass
     except Exception:
-        pass
+        logger.exception('Не удалось отозвать сессию при выходе')
 
 
 def is_device_session_active(user: User, device_id) -> bool:
     if device_id is None:
-        return True
+        return False
     try:
         device_pk = int(device_id)
     except (TypeError, ValueError):
