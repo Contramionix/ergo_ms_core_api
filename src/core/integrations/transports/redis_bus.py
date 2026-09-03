@@ -5,9 +5,9 @@ Redis EventBus ModuleBridge (BRIDGE_EVENT_BUS=redis).
 публикуется в Redis для обработчиков на других процессах.
 ``emit`` возвращает результаты только локальных обработчиков.
 
-В Redis уходит JSON: объект ``user`` заменяется на ``user_id`` и
-``user_public_id``. ORM, request и прочие несериализуемые значения
-не публикуются (как в HTTP-мосте).
+В Redis уходит JSON: ``user`` → идентификаторы, пункт меню и
+уведомление → плоские dict. Прочий несериализуемый мусор в extra
+не публикуется; поля контракта без сериализации дают ошибку.
 """
 
 from __future__ import annotations
@@ -17,11 +17,13 @@ import logging
 import threading
 from datetime import date, datetime
 from typing import Any, Callable
-from uuid import UUID
 
 from django.conf import settings
 
-from .user_identity import apply_user_ids, is_user_like
+from src.core.integrations.exceptions import BridgePayloadError
+
+from .payload import jsonable_value, prepare_incoming_kwargs, prepare_outgoing_kwargs
+from .user_identity import is_user_like
 
 logger = logging.getLogger('integrations.bridge.redis')
 
@@ -30,25 +32,21 @@ _listener_lock = threading.Lock()
 
 
 def _jsonable(value: Any) -> Any:
-    if value is None or isinstance(value, (bool, int, float, str)):
-        return value
-    if isinstance(value, UUID):
-        return str(value)
     if isinstance(value, (datetime, date)):
         return value.isoformat()
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    raise TypeError(f'Bridge Redis: значение типа {type(value).__name__} нельзя сериализовать в JSON')
+    return jsonable_value(value)
+
+
+_CONTRACT_KEYS = frozenset({'item', 'notification', 'user'})
 
 
 def _event_payload_for_redis(payload: dict[str, Any]) -> dict[str, Any]:
-    """Копия payload для pub/sub: user → идентификаторы, остальное — JSON-примитивы."""
-    prepared = apply_user_ids(payload)
-    if payload.get('user') is not None and not is_user_like(payload.get('user')):
+    """Копия payload для pub/sub: user → идентификаторы, item/notification → dict."""
+    outgoing = dict(payload)
+    prepared = prepare_outgoing_kwargs(outgoing)
+    if outgoing.get('user') is not None and not is_user_like(outgoing.get('user')):
         try:
-            prepared['user'] = _jsonable(payload.get('user'))
+            prepared['user'] = _jsonable(outgoing.get('user'))
         except TypeError:
             prepared.pop('user', None)
 
@@ -56,8 +54,13 @@ def _event_payload_for_redis(payload: dict[str, Any]) -> dict[str, Any]:
     for key, value in prepared.items():
         try:
             safe[str(key)] = _jsonable(value)
-        except TypeError:
-            logger.debug(
+        except TypeError as exc:
+            if key in _CONTRACT_KEYS:
+                raise BridgePayloadError(
+                    f"Bridge Redis: payload {key!r} типа {type(value).__name__} "
+                    f"нельзя сериализовать в JSON"
+                ) from exc
+            logger.warning(
                 'Bridge Redis: пропуск payload %s (%s)',
                 key,
                 type(value).__name__,
@@ -163,6 +166,8 @@ class RedisEventBus:
             client.publish(f'{_CHANNEL_PREFIX}{event}', body)
             # также общий канал для подписки «на всё»
             client.publish(f'{_CHANNEL_PREFIX}*', body)
+        except BridgePayloadError:
+            raise
         except Exception:
             logger.exception("Не удалось опубликовать bridge event '%s'", event)
 
@@ -223,9 +228,10 @@ class RedisEventBus:
                     continue
                 with self._lock:
                     handlers = list(self._subscribers.get(event, []))
+                incoming = prepare_incoming_kwargs(payload)
                 for handler in handlers:
                     try:
-                        handler(**payload)
+                        handler(**incoming)
                     except Exception:
                         logger.exception(
                             "Remote event handler %s for '%s' raised",

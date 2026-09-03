@@ -48,7 +48,9 @@ from src.core.cms.adp.services.user_deletion import revoke_user_auth
 from src.core.cms.adp.services.jwt_platform_claims import attach_platform_auth_claims
 from src.core.cms.adp.session_context_tokens import ScopedSessionRefreshToken
 from src.core.integrations import bridge
+from src.core.integrations.exceptions import BridgeUnavailable
 from src.core.integrations.module_contracts import SESSION_RESTORE_CLAIMS
+from src.core.integrations.transports.user_identity import bridge_user_kwargs
 from src.core.cms.adp.user_agent_utils import (
     build_device_display_name,
     detect_device_type,
@@ -465,13 +467,21 @@ class UserAuthorizationView(BaseAPIViewPublicMixin):
                     restore_claims = {}
                 else:
                     public_id = getattr(user, 'public_id', None)
-                    restore_claims = bridge.call(
-                        SESSION_RESTORE_CLAIMS,
-                        user=user,
-                        user_id=user.pk,
-                        user_public_id=str(public_id) if public_id else '',
-                        default={},
-                    ) or {}
+                    try:
+                        restore_claims = bridge.call(
+                            SESSION_RESTORE_CLAIMS,
+                            default={},
+                            **bridge_user_kwargs(
+                                user,
+                                user_id=user.pk,
+                                user_public_id=str(public_id) if public_id else '',
+                            ),
+                        ) or {}
+                    except BridgeUnavailable:
+                        logger.warning(
+                            'session.restore_claims недоступен, вход без claim модулей'
+                        )
+                        restore_claims = {}
                     if not isinstance(restore_claims, dict):
                         restore_claims = {}
 

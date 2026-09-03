@@ -22,6 +22,7 @@ from django.template.loader import render_to_string
 from django.utils.html import strip_tags
 
 from src.core.integrations import bridge
+from src.core.integrations.exceptions import BridgeUnavailable
 from src.core.integrations.module_contracts import (
     NOTIFICATIONS_EMAIL_CONTEXT_GROUP,
     NOTIFICATIONS_EMAIL_TEMPLATES_GROUP,
@@ -136,7 +137,13 @@ def _render_template(template_name: str, context: dict) -> str | None:
 
 def _try_programmatic(notification, context: dict) -> RenderedEmail | None:
     op = f'{NOTIFICATIONS_RENDER_EMAIL_PREFIX}{notification.source_module or ""}'
-    if not notification.source_module or not bridge.has(op):
+    if not notification.source_module:
+        return None
+    try:
+        if not bridge.has(op):
+            return None
+    except BridgeUnavailable:
+        logger.warning('Programmatic render %s: модуль не ответил', op)
         return None
     try:
         result = bridge.call(op, notification=notification, base_context=context)

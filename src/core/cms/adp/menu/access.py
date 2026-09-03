@@ -7,6 +7,7 @@ from src.core.integrations.module_contracts import (
     MENU_CAN_SEE_ITEM,
     MENU_PREPARE_VISIBILITY,
 )
+from src.core.integrations.transports.user_identity import bridge_user_kwargs
 
 # Синтетический хвост: deny `/module/**` скрывает вложенные пути модуля в меню.
 # Корень `/module` проверяется отдельно — шаблон `/**` его тоже закрывает.
@@ -18,8 +19,7 @@ def _collect_route_overrides(user, session_claims=None) -> dict[str, bool]:
     overrides: dict[str, bool] = {}
     for result in bridge.emit(
         MENU_PREPARE_VISIBILITY,
-        user=user,
-        **dict(session_claims or {}),
+        **bridge_user_kwargs(user, **dict(session_claims or {})),
     ):
         if not isinstance(result, dict):
             continue
@@ -144,8 +144,7 @@ class MenuAccessChecker:
         menu_override = bridge.emit_first(
             MENU_CAN_SEE_ITEM,
             item=item,
-            user=self.user,
-            **self.session_claims,
+            **bridge_user_kwargs(self.user, **self.session_claims),
         )
         if menu_override is not None:
             return bool(menu_override)

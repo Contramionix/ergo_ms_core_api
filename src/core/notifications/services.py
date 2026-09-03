@@ -9,6 +9,8 @@ from django.db.models import Q
 from django.utils import timezone
 
 from src.core.integrations import bridge
+from src.core.integrations.exceptions import BridgeUnavailable
+from src.core.integrations.transports.user_identity import bridge_user_kwargs
 from src.core.realtime.hub import RealtimeHub
 from src.core.realtime.topics import notifications_user_group, notifications_user_topic
 
@@ -455,7 +457,18 @@ class NotificationService:
             return {'success': False, 'error': 'invalid_action'}
 
         handler = action_def.get('handler') or ''
-        if not is_allowed_notification_action_handler(handler) or not bridge.has(handler):
+        try:
+            handler_ready = (
+                is_allowed_notification_action_handler(handler)
+                and bridge.has(handler)
+            )
+        except BridgeUnavailable:
+            logger.warning(
+                'NotificationService.execute_action: handler %r не ответил',
+                handler,
+            )
+            return {'success': False, 'error': 'handler_unavailable'}
+        if not handler_ready:
             logger.warning(
                 'NotificationService.execute_action: handler %r не зарегистрирован',
                 handler,
@@ -467,7 +480,7 @@ class NotificationService:
                 handler,
                 notification=notification,
                 action_id=action_id,
-                user=user,
+                **bridge_user_kwargs(user),
             )
         except Exception:
             logger.exception(

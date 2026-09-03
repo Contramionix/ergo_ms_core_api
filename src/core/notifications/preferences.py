@@ -11,6 +11,8 @@
 import logging
 
 from src.core.integrations import bridge
+from src.core.integrations.exceptions import BridgeUnavailable
+from src.core.integrations.transports.user_identity import bridge_user_kwargs
 
 from . import catalog
 from .models import NotificationPreference, NotificationUserSettings
@@ -199,10 +201,18 @@ class PreferencePanelService:
         from src.core.integrations.module_contracts import NOTIFICATIONS_FILTER_EVENTS_PREFIX
 
         op = f'{NOTIFICATIONS_FILTER_EVENTS_PREFIX}{module}'
-        if not bridge.has(op):
+        try:
+            if not bridge.has(op):
+                return events
+        except BridgeUnavailable:
+            logger.warning('Фильтр каталога уведомлений %s: модуль не ответил', op)
             return events
         try:
-            allowed = bridge.call(op, user=user, event_keys=[e['event_key'] for e in events])
+            allowed = bridge.call(
+                op,
+                event_keys=[e['event_key'] for e in events],
+                **bridge_user_kwargs(user),
+            )
         except Exception:
             logger.exception('Фильтр каталога уведомлений %s упал', op)
             return events

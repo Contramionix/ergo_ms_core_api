@@ -26,6 +26,7 @@ from src.core.integrations.module_contracts import (
     ADP_SESSION_SCOPED_MODULE_PERMISSIONS,
 )
 from src.core.integrations.session_context import merge_session_scope_kwargs
+from src.core.integrations.transports.user_identity import bridge_user_kwargs
 
 
 class RoleAssignmentError(Exception):
@@ -383,8 +384,7 @@ class PermissionService:
         extra = []
         for result in bridge.emit(
             ADP_SESSION_SCOPED_MODULE_PERMISSIONS,
-            user=user,
-            **claims,
+            **bridge_user_kwargs(user, **claims),
         ):
             if not result:
                 continue
@@ -401,8 +401,7 @@ class PermissionService:
             return denied
         for result in bridge.emit(
             ADP_SESSION_SCOPED_DENIED_PERMISSIONS,
-            user=user,
-            **claims,
+            **bridge_user_kwargs(user, **claims),
         ):
             if not result:
                 continue
@@ -806,10 +805,12 @@ class PermissionService:
         # Первый non-None результат побеждает.
         contextual = bridge.emit_first(
             ADP_PERMISSION_CHECK,
-            user=user,
-            module_name=module_name,
-            permission_key=permission_key,
-            kwargs=kwargs,
+            **bridge_user_kwargs(
+                user,
+                module_name=module_name,
+                permission_key=permission_key,
+                kwargs=kwargs,
+            ),
         )
         if contextual is not None:
             return contextual

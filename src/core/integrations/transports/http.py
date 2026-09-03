@@ -16,9 +16,9 @@ from uuid import UUID
 import httpx
 from django.conf import settings
 
-from ..exceptions import DuplicateProvider
+from ..exceptions import BridgePayloadError, BridgeUnavailable, DuplicateProvider
 from .bind_kwargs import kwargs_accepted_by_handler
-from .user_identity import apply_user_ids
+from .payload import prepare_outgoing_kwargs
 from ..service_map import (
     all_remote_base_urls,
     build_service_map,
@@ -246,31 +246,34 @@ def _json_safe(value: Any) -> Any:
     )
 
 
+def _http_status(exc: Exception) -> int | None:
+    return getattr(getattr(exc, 'response', None), 'status_code', None)
+
+
 def _json_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     """JSON-примитивы. user-like заменяется на user_id / user_public_id."""
     safe: dict[str, Any] = {}
-    for key, value in apply_user_ids(kwargs).items():
+    for key, value in prepare_outgoing_kwargs(kwargs).items():
         try:
             safe[str(key)] = _json_safe(value)
-        except TypeError:
-            logger.debug(
-                'Bridge HTTP: пропуск kwargs %s (%s)',
-                key,
-                type(value).__name__,
-            )
+        except TypeError as exc:
+            raise BridgePayloadError(
+                f"Bridge HTTP: kwargs {key!r} типа {type(value).__name__} "
+                f"нельзя сериализовать в JSON"
+            ) from exc
     return safe
 
 
 def _json_kwargs_list(args: tuple[Any, ...]) -> list[Any]:
     safe: list[Any] = []
-    for value in args:
+    for index, value in enumerate(args):
         try:
             safe.append(_json_safe(value))
-        except TypeError:
-            logger.debug(
-                'Bridge HTTP: пропуск args (%s)',
-                type(value).__name__,
-            )
+        except TypeError as exc:
+            raise BridgePayloadError(
+                f"Bridge HTTP: args[{index}] типа {type(value).__name__} "
+                f"нельзя сериализовать в JSON"
+            ) from exc
     return safe
 
 
@@ -325,15 +328,21 @@ class HttpTransport:
             return False
         try:
             return self._remote_has(base, name)
-        except Exception:
-            # Недоступный peer при старте/проверках — как отсутствие провайдера.
-            logger.debug(
+        except BridgePayloadError:
+            raise
+        except Exception as exc:
+            status = _http_status(exc)
+            if status == 404:
+                return False
+            logger.warning(
                 "Bridge HTTP has(%s) failed via %s",
                 name,
                 base,
                 exc_info=True,
             )
-            return False
+            raise BridgeUnavailable(
+                f"Bridge HTTP has({name!r}) failed via {base}"
+            ) from exc
 
     def call(
         self,
@@ -352,14 +361,19 @@ class HttpTransport:
             return default
         try:
             return self._remote_call(base, name, args, kwargs)
+        except BridgePayloadError:
+            raise
         except Exception as exc:
-            status = getattr(getattr(exc, 'response', None), 'status_code', None)
+            status = _http_status(exc)
+            if status == 404:
+                return default
             if status == 429:
-                # Лимит на ядре — ожидаемо при jwt_claims на каждый запрос; не traceback.
                 logger.warning("Bridge HTTP call limited for '%s' via %s", name, base)
             else:
                 logger.exception("Bridge HTTP call failed for '%s' via %s", name, base)
-            return default
+            raise BridgeUnavailable(
+                f"Bridge HTTP call {name!r} failed via {base}"
+            ) from exc
 
     def all(self, group: str) -> dict[str, Any]:
         with self._lock:

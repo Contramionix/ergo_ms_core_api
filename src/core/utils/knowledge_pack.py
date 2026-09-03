@@ -1,7 +1,8 @@
 """Публикация пакетов справки в media_api (knowledge/<owner>/<revision>/).
 
 Владелец пишет на свой диск. Потребитель читает локально или через sign_read.
-В пакет попадают только user_guides, user_description и выбранные страницы .docs/.
+В пакет попадают user_guides, user_description, выбранные страницы .docs/
+и автоматически собранный каталог экранов клиента (маршруты, поля, кнопки).
 """
 
 from __future__ import annotations
@@ -115,7 +116,7 @@ def _document(
 
 
 def collect_core_documents() -> list[dict[str, Any]]:
-    """user_guides ядра и выбранные страницы .docs/."""
+    """user_guides ядра, выбранные страницы .docs/ и автокаталог экранов кабинета."""
     documents: list[dict[str, Any]] = []
     guides_dir = SYSTEM_DIR / 'core' / 'api' / 'user_guides'
     if guides_dir.is_dir():
@@ -138,6 +139,7 @@ def collect_core_documents() -> list[dict[str, Any]]:
             text=_read_text_file(path),
         ))
     from src.core.utils.knowledge_capabilities import site_overview_documents
+    from src.core.utils.ui_catalog import collect_core_ui_documents
 
     for item in site_overview_documents():
         documents.append(_document(
@@ -147,12 +149,31 @@ def collect_core_documents() -> list[dict[str, Any]]:
             language=str(item.get('language') or 'ru'),
             permission_key=str(item.get('permission_key') or ''),
         ))
+    for item in collect_core_ui_documents():
+        documents.append(_document(
+            doc_id=str(item.get('id') or 'ui_catalog'),
+            title=str(item.get('title') or item.get('id') or 'ui_catalog'),
+            text=str(item.get('text') or ''),
+            language=str(item.get('language') or 'ru'),
+            permission_key=str(item.get('permission_key') or ''),
+        ))
+        if item.get('audience'):
+            documents[-1]['audience'] = str(item['audience'])
     return documents
 
 
 def collect_module_documents(module_name: str) -> list[dict[str, Any]]:
-    """user_guides модуля и user_description из каталога прав."""
+    """user_guides модуля, user_description и автокаталог экранов клиента.
+
+    На процессе ядра вынесенный модуль сам публикует пакет: локальный диск
+    ``modules/<name>/api/user_guides`` не обходим.
+    """
     owner = normalize_owner(module_name)
+    if _is_core_process():
+        from src.core.utils.module_registry import get_microservice_modules
+
+        if owner in get_microservice_modules():
+            return []
     documents: list[dict[str, Any]] = []
     description = _module_user_description(owner)
     if description:
@@ -171,6 +192,18 @@ def collect_module_documents(module_name: str) -> list[dict[str, Any]]:
                 title=path.stem.replace('_', ' '),
                 text=_read_text_file(path),
             ))
+    from src.core.utils.ui_catalog import collect_module_ui_documents
+
+    for item in collect_module_ui_documents(owner):
+        documents.append(_document(
+            doc_id=str(item.get('id') or 'ui_catalog'),
+            title=str(item.get('title') or item.get('id') or 'ui_catalog'),
+            text=str(item.get('text') or ''),
+            language=str(item.get('language') or 'ru'),
+            permission_key=str(item.get('permission_key') or ''),
+        ))
+        if item.get('audience'):
+            documents[-1]['audience'] = str(item['audience'])
     return documents
 
 
@@ -322,10 +355,14 @@ def publish_local_knowledge_packs() -> list[dict[str, str]]:
             published.append(descriptor)
         from src.core.utils.module_registry import (
             get_installed_module_names,
+            get_microservice_modules,
             is_module_loadable_in_process,
         )
 
+        split = get_microservice_modules()
         for name in get_installed_module_names():
+            if name in split:
+                continue
             if not is_module_loadable_in_process(name):
                 continue
             documents = collect_module_documents(name)
@@ -345,13 +382,15 @@ def restore_pack_descriptors_from_media() -> None:
         owners.append(CORE_OWNER)
         from src.core.utils.module_registry import (
             get_installed_module_names,
+            get_microservice_modules,
             is_module_loadable_in_process,
         )
 
+        split = get_microservice_modules()
         owners.extend(
             name
             for name in get_installed_module_names()
-            if is_module_loadable_in_process(name)
+            if name not in split and is_module_loadable_in_process(name)
         )
     for owner in owners:
         try:

@@ -129,8 +129,7 @@ class ModuleBridge:
         Вызвать зарегистрированную операцию по строковому имени.
 
         Если провайдер отсутствует — вернуть default (по умолчанию None).
-        Никаких эвристик и исключений. Потребитель сам при необходимости
-        проверяет bridge.has(name) или передаёт default=[]/default=False.
+        Если транспорт до peer сломался — BridgeUnavailable, не default.
         """
         return cls._transport.call(name, args, kwargs, default)
 

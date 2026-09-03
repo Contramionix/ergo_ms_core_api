@@ -15,6 +15,7 @@ from src.core.cms.adp.services.jwt_claims_cache import (
 )
 from src.core.cms.adp.services.session_devices import is_device_session_active
 from src.core.integrations import bridge
+from src.core.integrations.exceptions import BridgeUnavailable
 from src.core.integrations.module_contracts import SESSION_DEVICE_ACTIVE
 
 
@@ -116,13 +117,16 @@ class DeviceBoundJWTAuthentication(JWTAuthentication):
         if isinstance(cached, dict):
             return self._principal_from_snapshot(validated_token, user_id, public_id, cached)
 
-        raw = bridge.call(
-            SESSION_DEVICE_ACTIVE,
-            user_id=user_id,
-            device_id=device_id,
-            user_public_id=public_id_str,
-            default=None,
-        )
+        try:
+            raw = bridge.call(
+                SESSION_DEVICE_ACTIVE,
+                user_id=user_id,
+                device_id=device_id,
+                user_public_id=public_id_str,
+                default=None,
+            )
+        except BridgeUnavailable:
+            raw = None
         snapshot = _device_active_snapshot(raw) if raw is not None else None
         if snapshot is not None:
             set_device_snapshot(user_id, device_id, public_id_str, snapshot)

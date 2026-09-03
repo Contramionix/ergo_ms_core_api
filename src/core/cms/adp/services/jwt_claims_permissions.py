@@ -6,6 +6,7 @@ from django.conf import settings
 
 from src.core.cms.adp.services.jwt_claims_cache import extra_fingerprint, get_adp, set_adp
 from src.core.integrations import bridge
+from src.core.integrations.exceptions import BridgeUnavailable
 from src.core.integrations.module_contracts import (
     ADP_CHECK_API_ACCESS,
     ADP_CHECK_MODULE_PERMISSION,
@@ -64,7 +65,10 @@ def remote_is_admin(user) -> bool:
     cached = get_adp('admin', kwargs['user_id'], kwargs['user_public_id'])
     if cached is not None:
         return bool(cached)
-    result = bridge.call(ADP_IS_ADMIN, default=None, **kwargs)
+    try:
+        result = bridge.call(ADP_IS_ADMIN, default=None, **kwargs)
+    except BridgeUnavailable:
+        result = None
     if result is None:
         # Мост недоступен или пользователь на ядре не найден: не кэшируем «не админ».
         return bool(
@@ -82,12 +86,15 @@ def remote_check_api_access(user, api_path: str) -> bool:
     cached = get_adp('api', kwargs['user_id'], kwargs['user_public_id'], path)
     if cached is not None:
         return bool(cached)
-    result = bridge.call(
-        ADP_CHECK_API_ACCESS,
-        default=None,
-        api_path=path,
-        **kwargs,
-    )
+    try:
+        result = bridge.call(
+            ADP_CHECK_API_ACCESS,
+            default=None,
+            api_path=path,
+            **kwargs,
+        )
+    except BridgeUnavailable:
+        result = None
     if result is None:
         return bool(getattr(user, 'is_authenticated', False))
     value = bool(result)
@@ -107,14 +114,17 @@ def remote_check_module_permission(
     cached = get_adp('perm', kwargs['user_id'], kwargs['user_public_id'], extra_key)
     if cached is not None:
         return bool(cached)
-    result = bridge.call(
-        ADP_CHECK_MODULE_PERMISSION,
-        default=None,
-        module_name=module_name,
-        permission_key=permission_key,
-        extra=extra,
-        **kwargs,
-    )
+    try:
+        result = bridge.call(
+            ADP_CHECK_MODULE_PERMISSION,
+            default=None,
+            module_name=module_name,
+            permission_key=permission_key,
+            extra=extra,
+            **kwargs,
+        )
+    except BridgeUnavailable:
+        result = None
     if result is None:
         return bool(getattr(user, 'is_authenticated', False))
     value = bool(result)

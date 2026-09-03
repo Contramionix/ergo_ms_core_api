@@ -27,6 +27,7 @@ from src.core.integrations.module_contracts import (
     SESSION_DEVICE_ACTIVE,
 )
 from src.core.integrations.transports.bind_kwargs import kwargs_accepted_by_handler
+from src.core.integrations.transports.payload import prepare_incoming_kwargs
 from src.core.utils.request_id import request_id_from_meta
 
 # jwt_claims на каждом запросе модуля: не режем служебный вход лимитом общего моста.
@@ -234,7 +235,8 @@ def bridge_call(request: HttpRequest) -> HttpResponse:
         return JsonResponse({'detail': f'Provider {op!r} not found locally'}, status=404)
 
     try:
-        result = handler(*args, **kwargs_accepted_by_handler(handler, kwargs))
+        incoming = prepare_incoming_kwargs(kwargs)
+        result = handler(*args, **kwargs_accepted_by_handler(handler, incoming))
     except Exception:
         logger.exception('internal bridge call failed for %s', op)
         return JsonResponse({'detail': 'Handler error'}, status=500)

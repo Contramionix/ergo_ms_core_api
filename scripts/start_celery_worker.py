@@ -178,6 +178,8 @@ def main() -> int:
     if module_name:
         os.environ['ERGO_PROCESS_ROLE'] = f'module:{module_name}'
         os.environ['PROCESS_MODULES'] = module_name
+    else:
+        os.environ.setdefault('ERGO_PROCESS_ROLE', 'worker')
     if module_name and not user_queues and not opts.worker:
         from src.core.utils.celery.module_queues import queues_for_module
         from src.core.utils.celery_config_cache import read_routes_queues_cache

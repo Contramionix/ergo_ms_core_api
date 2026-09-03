@@ -40,15 +40,22 @@ Module Bridge — единый механизм межмодульного вз�
     if not bridge.has('<name>.get_entity'):
         return Response(...)
 
-Если модуль-провайдер не подключён, bridge.call возвращает default
-(тихо, без исключений), а bridge.emit — пустой список.
+Если провайдера нет, bridge.call возвращает default, а bridge.emit —
+пустой список. Если peer не ответил, HTTP-транспорт поднимает
+BridgeUnavailable: это не то же самое, что «провайдера нет».
 
 Подробнее о транспортах (in-process / HTTP / Celery) —
 см. transports/base.py.
 """
 
 from .bridge import ModuleBridge, bridge
-from .exceptions import BridgeContractError, BridgeError, DuplicateProvider
+from .exceptions import (
+    BridgeContractError,
+    BridgeError,
+    BridgePayloadError,
+    BridgeUnavailable,
+    DuplicateProvider,
+)
 from .isolation import BridgeIsolationError, BridgeIsolationWarning
 from .transports import (
     EventBus,
@@ -64,6 +71,8 @@ __all__ = [
     'bridge',
     'BridgeError',
     'BridgeContractError',
+    'BridgePayloadError',
+    'BridgeUnavailable',
     'DuplicateProvider',
     'BridgeIsolationError',
     'BridgeIsolationWarning',
