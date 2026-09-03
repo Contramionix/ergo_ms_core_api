@@ -5,6 +5,7 @@
 из файлов permission_catalog.py каждого модуля. Результат кешируется
 в памяти процесса.
 """
+import ast
 import importlib
 import logging
 from typing import Any, Dict, FrozenSet, List, Optional
@@ -118,6 +119,53 @@ def _is_slug_like_module_label(module_name: str, label: str) -> bool:
 
 
 _help_title_cache: Optional[Dict[str, str]] = None
+_disk_catalog_cache: Optional[Dict[str, Dict[str, str]]] = None
+
+
+def _ast_string(node: ast.AST) -> Optional[str]:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        value = node.value.strip()
+        return value or None
+    return None
+
+
+def _permission_catalog_strings_from_disk(module_name: str) -> Dict[str, str]:
+    """module_label / user_description из permission_catalog.py без импорта приложения."""
+    global _disk_catalog_cache
+    if _disk_catalog_cache is None:
+        _disk_catalog_cache = {}
+        try:
+            from src.config.settings.base import MODULES_DIR
+        except Exception:
+            return {}
+        if not MODULES_DIR.is_dir():
+            return {}
+        for path in MODULES_DIR.glob('*/api/permission_catalog.py'):
+            try:
+                tree = ast.parse(path.read_text(encoding='utf-8'))
+            except Exception:
+                continue
+            extracted: Dict[str, str] = {}
+            for node in tree.body:
+                if not isinstance(node, ast.Assign):
+                    continue
+                if not any(
+                    isinstance(target, ast.Name) and target.id == 'PERMISSION_CATALOG'
+                    for target in node.targets
+                ):
+                    continue
+                if not isinstance(node.value, ast.Dict):
+                    continue
+                for key_node, val_node in zip(node.value.keys, node.value.values):
+                    key = _ast_string(key_node)
+                    if key not in ('module_label', 'user_description'):
+                        continue
+                    value = _ast_string(val_node)
+                    if value:
+                        extracted[key] = value
+            if extracted:
+                _disk_catalog_cache[path.parent.parent.name] = extracted
+    return dict(_disk_catalog_cache.get(module_name) or {})
 
 
 def _help_yaml_module_title(module_name: str) -> Optional[str]:
@@ -239,6 +287,10 @@ def _resolve_module_label(module_name: str, catalog: Optional[Dict] = None) -> s
         if isinstance(label, str) and label.strip() and not _is_slug_like_module_label(key, label):
             return label.strip()
 
+    disk_label = _permission_catalog_strings_from_disk(key).get('module_label') or ''
+    if disk_label and not _is_slug_like_module_label(key, disk_label):
+        return disk_label
+
     help_title = _help_yaml_module_title(key)
     if help_title and not _is_slug_like_module_label(key, help_title):
         return help_title
@@ -320,8 +372,92 @@ def get_modules_catalog(*, include_disabled: bool = False) -> List[Dict[str, Any
     return modules
 
 
+def iter_slug_title_replacements() -> list[tuple[str, str]]:
+    """Пары «Title Case из имени папки» → русская подпись. Без захардкоженных имён модулей."""
+    from src.core.utils.module_registry import get_installed_module_names
+
+    pairs: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    catalogs = _get_cache().get('catalogs') or {}
+    names = set(catalogs) | set(get_installed_module_names(include_disabled=True))
+    for name in names:
+        name = str(name or '').strip()
+        if not name:
+            continue
+        catalog = catalogs.get(name)
+        label = ''
+        if isinstance(catalog, dict):
+            label = str(catalog.get('module_label') or '').strip()
+        if not label or _is_slug_like_module_label(name, label):
+            label = _resolve_module_label(name, catalog if isinstance(catalog, dict) else None)
+        if not label or _is_slug_like_module_label(name, label):
+            continue
+        slug_title = _format_module_slug(name)
+        if not slug_title or slug_title.casefold() == label.casefold():
+            continue
+        key = slug_title.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        pairs.append((slug_title, label))
+    pairs.sort(key=lambda item: len(item[0]), reverse=True)
+    return pairs
+
+
+def rewrite_slug_module_labels(text: str) -> str:
+    """Меняет в тексте английский title-case slug на подпись из каталога."""
+    value = text or ''
+    if not value:
+        return value
+    try:
+        replacements = iter_slug_title_replacements()
+    except Exception:
+        return value
+    for slug_title, label in replacements:
+        value = value.replace(slug_title, label)
+    from src.core.utils.user_facing import sanitize_user_facing_text
+
+    return sanitize_user_facing_text(value)
+
+
+def localize_module_entries(modules: list) -> list:
+    """Подставляет местные русские подписи, если с ядра пришёл title-case slug."""
+    from src.core.utils.user_facing import sanitize_user_facing_label, sanitize_user_facing_text
+
+    catalogs = _get_cache().get('catalogs') or {}
+    localized: list = []
+    for raw in modules or []:
+        if not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        name = str(item.get('name') or item.get('module_name') or '').strip()
+        if name:
+            catalog = catalogs.get(name) if isinstance(catalogs.get(name), dict) else None
+            loc_label = ''
+            if catalog:
+                loc_label = str(catalog.get('module_label') or '').strip()
+            if not loc_label or _is_slug_like_module_label(name, loc_label):
+                loc_label = _resolve_module_label(name, catalog)
+            if loc_label and not _is_slug_like_module_label(name, loc_label):
+                item['label'] = loc_label
+            loc_desc = ''
+            if catalog:
+                loc_desc = catalog.get('user_description') or ''
+            if not (isinstance(loc_desc, str) and loc_desc.strip()):
+                loc_desc = _permission_catalog_strings_from_disk(name).get('user_description') or ''
+            if isinstance(loc_desc, str) and loc_desc.strip():
+                item['user_description'] = loc_desc.strip()
+        if item.get('label'):
+            item['label'] = sanitize_user_facing_label(str(item['label']))
+        if item.get('user_description'):
+            item['user_description'] = sanitize_user_facing_text(str(item['user_description']))
+        localized.append(item)
+    return localized
+
+
 def clear_cache() -> None:
     """Сбрасывает кэш каталога прав и подписей модулей."""
-    global _catalog_cache, _help_title_cache
+    global _catalog_cache, _help_title_cache, _disk_catalog_cache
     _catalog_cache = None
     _help_title_cache = None
+    _disk_catalog_cache = None

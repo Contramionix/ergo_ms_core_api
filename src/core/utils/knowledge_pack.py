@@ -90,8 +90,42 @@ def assert_knowledge_path(path: str, *, owner: str | None = None) -> str:
     return normalized
 
 
+_HTML_TAG_RE = re.compile(r'<\s*/?\s*[a-zA-Z][^>]*>')
+
+
+def html_to_plain(text: str) -> str:
+    """Убирает HTML из справки: списки становятся markdown, теги не попадают в чат."""
+    raw = text or ''
+    if not _HTML_TAG_RE.search(raw):
+        return raw
+    from html import unescape
+
+    from django.utils.html import strip_tags
+
+    value = re.sub(r'<\s*br\s*/?\s*>', '\n', raw, flags=re.I)
+    value = re.sub(r'<\s*/\s*p\s*>', '\n', value, flags=re.I)
+    value = re.sub(r'<\s*p\b[^>]*>', '', value, flags=re.I)
+    value = re.sub(r'<\s*/\s*li\s*>\s*<\s*li\b[^>]*>', '\n- ', value, flags=re.I)
+    value = re.sub(r'<\s*li\b[^>]*>', '\n- ', value, flags=re.I)
+    value = re.sub(r'<\s*/?\s*(ul|ol)\b[^>]*>', '\n', value, flags=re.I)
+    value = unescape(strip_tags(value))
+    value = re.sub(r'[ \t]+\n', '\n', value)
+    value = re.sub(r'\n{3,}', '\n\n', value)
+    return value.strip()
+
+
+def _title_from_markdown(text: str, fallback: str) -> str:
+    for line in (text or '').splitlines():
+        stripped = line.strip()
+        if stripped.startswith('#'):
+            title = stripped.lstrip('#').strip()
+            if title:
+                return title
+    return fallback
+
+
 def _read_text_file(path: Path) -> str:
-    text = path.read_text(encoding='utf-8')
+    text = html_to_plain(path.read_text(encoding='utf-8'))
     if len(text) > DOC_TEXT_MAX_CHARS:
         return text[:DOC_TEXT_MAX_CHARS]
     return text
@@ -107,8 +141,8 @@ def _document(
 ) -> dict[str, Any]:
     return {
         'id': doc_id,
-        'title': title,
-        'text': text,
+        'title': html_to_plain(title).strip() or title,
+        'text': html_to_plain(text),
         'audience': 'user',
         'permission_key': permission_key,
         'language': language,
@@ -123,10 +157,11 @@ def collect_core_documents() -> list[dict[str, Any]]:
         for path in sorted(guides_dir.glob('*.md')):
             if not path.is_file():
                 continue
+            body = _read_text_file(path)
             documents.append(_document(
                 doc_id=f'user_guide:{path.stem}',
-                title=path.stem.replace('_', ' '),
-                text=_read_text_file(path),
+                title=_title_from_markdown(body, path.stem.replace('_', ' ')),
+                text=body,
             ))
     docs_dir = SYSTEM_DIR / '.docs'
     for name in CORE_DOCS_ALLOWLIST:
@@ -179,7 +214,7 @@ def collect_module_documents(module_name: str) -> list[dict[str, Any]]:
     if description:
         documents.append(_document(
             doc_id='user_description',
-            title=owner,
+            title=_module_display_label(owner),
             text=description,
         ))
     guides_dir = MODULES_DIR / owner / 'api' / 'user_guides'
@@ -187,10 +222,11 @@ def collect_module_documents(module_name: str) -> list[dict[str, Any]]:
         for path in sorted(guides_dir.glob('*.md')):
             if not path.is_file():
                 continue
+            body = _read_text_file(path)
             documents.append(_document(
                 doc_id=f'user_guide:{path.stem}',
-                title=path.stem.replace('_', ' '),
-                text=_read_text_file(path),
+                title=_title_from_markdown(body, path.stem.replace('_', ' ')),
+                text=body,
             ))
     from src.core.utils.ui_catalog import collect_module_ui_documents
 
@@ -207,14 +243,35 @@ def collect_module_documents(module_name: str) -> list[dict[str, Any]]:
     return documents
 
 
-def _module_user_description(module_name: str) -> str:
-    from src.core.cms.adp.services.permission_catalog import get_modules_catalog
+def _module_catalog_row(module_name: str) -> dict[str, str]:
+    from src.core.cms.adp.services.permission_catalog import (
+        _resolve_module_label,
+        get_modules_catalog,
+    )
 
     for item in get_modules_catalog():
         if item.get('module_name') == module_name:
             raw = item.get('user_description') or ''
-            return raw.strip() if isinstance(raw, str) else ''
-    return ''
+            return {
+                'label': str(item.get('module_label') or '').strip() or _resolve_module_label(module_name),
+                'user_description': raw.strip() if isinstance(raw, str) else '',
+            }
+    return {
+        'label': _resolve_module_label(module_name),
+        'user_description': '',
+    }
+
+
+def _module_display_label(module_name: str) -> str:
+    from src.core.utils.user_facing import sanitize_user_facing_label
+
+    return sanitize_user_facing_label(_module_catalog_row(module_name)['label'] or module_name)
+
+
+def _module_user_description(module_name: str) -> str:
+    from src.core.utils.user_facing import sanitize_user_facing_text
+
+    return sanitize_user_facing_text(_module_catalog_row(module_name)['user_description'])
 
 
 def compute_revision(documents: list[dict[str, Any]]) -> str:

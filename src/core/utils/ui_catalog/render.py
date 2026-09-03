@@ -10,6 +10,24 @@ _REQUIRED_LABEL = {
 }
 
 
+def _owner_display_label(owner: str) -> str:
+    name = (owner or '').strip()
+    if not name or name == 'core':
+        return ''
+    try:
+        from src.core.cms.adp.services.permission_catalog import (
+            _is_slug_like_module_label,
+            _resolve_module_label,
+        )
+
+        label = _resolve_module_label(name)
+    except Exception:
+        return ''
+    if not label or _is_slug_like_module_label(name, label):
+        return ''
+    return label
+
+
 def _field_line(field: UiField) -> str:
     bits = [field.label]
     extra: list[str] = []
@@ -34,7 +52,9 @@ def render_screen_markdown(screen: UiScreen, *, owner: str = '') -> str:
     if screen.path:
         location.append(f'Путь: {screen.path}')
     if owner:
-        location.append(f'Модуль: {owner}')
+        label = _owner_display_label(owner)
+        if label:
+            location.append(f'Модуль: {label}')
     if location:
         lines.append('. '.join(location) + '.')
         lines.append('')

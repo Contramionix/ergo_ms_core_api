@@ -10,6 +10,7 @@ from src.core.utils.knowledge_pack import (
     assert_knowledge_path,
     collect_module_documents,
     compute_revision,
+    html_to_plain,
     knowledge_sign_read_op,
     manifest_path,
     normalize_owner,
@@ -18,6 +19,13 @@ from src.core.utils.knowledge_pack import (
 
 
 class KnowledgePackPathTests(SimpleTestCase):
+    def test_html_lists_become_markdown(self):
+        self.assertEqual(
+            html_to_plain('<ul><li>Мониторинг</li><li>Дашборд</li></ul>'),
+            '- Мониторинг\n- Дашборд',
+        )
+        self.assertEqual(html_to_plain('Обычный текст'), 'Обычный текст')
+
     def test_owner_and_manifest_path(self):
         self.assertEqual(normalize_owner('Core'), CORE_OWNER)
         self.assertEqual(
