@@ -115,6 +115,17 @@ CELERY_BEAT_SCHEDULE['integrations-flush-outbox'] = {
     'schedule': 30.0,
 }
 
+_knowledge_publish = {
+    'task': 'core.knowledge.publish_packs',
+    'schedule': crontab(minute=20, hour='*/2'),
+}
+_process_role = (_env.str('ERGO_PROCESS_ROLE', default='') or '').strip().lower()
+if _process_role.startswith('module:'):
+    _module_queue = _process_role.split(':', 1)[1].strip()
+    if _module_queue:
+        _knowledge_publish['options'] = {'queue': _module_queue}
+CELERY_BEAT_SCHEDULE['knowledge-publish-packs'] = _knowledge_publish
+
 # Дополнительные настройки Beat из модулей
 CELERY_BEAT_ADDITIONAL_CONFIG = beat_module_manager.get_additional_beat_configs()
 

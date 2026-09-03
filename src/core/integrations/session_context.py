@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from contextvars import ContextVar
 from typing import Any, Callable
 
@@ -72,6 +73,10 @@ __all__ = (
     'reset_request_session_claim_values',
     'merge_session_scope_kwargs',
     'iter_payload_session_claim_names',
+    'coerce_session_claim_value',
+    'session_claims_from_mapping',
+    'session_claims_from_request',
+    'session_claims_key_part',
 )
 
 _descriptors_cache: list[dict] | None = None
@@ -243,3 +248,58 @@ def iter_payload_session_claim_names(payload: Any, descriptors: list) -> list[st
         _add(key)
 
     return names
+
+
+def coerce_session_claim_value(value: Any) -> int | None:
+    """Целое id из JWT / request; пустое и мусор — None."""
+    if value is None or value == '':
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def session_claims_from_mapping(payload: Any) -> dict[str, int]:
+    """Session-claim из JWT или похожего mapping. Ядро не знает имена ключей."""
+    if payload is None:
+        return {}
+    names = iter_payload_session_claim_names(payload, get_session_claim_descriptors())
+    claims: dict[str, int] = {}
+    for name in names:
+        try:
+            raw = payload.get(name)
+        except Exception:
+            continue
+        parsed = coerce_session_claim_value(raw)
+        if parsed is not None:
+            claims[name] = parsed
+    return claims
+
+
+def session_claims_from_request(request: Any) -> dict[str, int]:
+    """Session-claim текущего запроса: ContextVar, затем атрибуты request."""
+    bound = get_request_session_claim_values()
+    if bound:
+        return bound
+    if request is None:
+        return {}
+    claims: dict[str, int] = {}
+    for descriptor in get_session_claim_descriptors():
+        attr = descriptor.get('request_attr') or descriptor.get('claim')
+        claim = descriptor.get('claim')
+        if not claim or not attr:
+            continue
+        parsed = coerce_session_claim_value(getattr(request, attr, None))
+        if parsed is not None:
+            claims[str(claim)] = parsed
+    return claims
+
+
+def session_claims_key_part(session_claims: dict | None) -> str:
+    """Стабильный хвост ключа кэша по набору claim, без имён домена в коде."""
+    if not session_claims:
+        return 's0'
+    parts = [f'{key}={session_claims[key]}' for key in sorted(session_claims)]
+    digest = hashlib.sha256('|'.join(parts).encode('utf-8')).hexdigest()[:16]
+    return f's{digest}'

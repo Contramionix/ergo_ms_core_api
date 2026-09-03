@@ -50,8 +50,10 @@ class IntegrationsConfig(AppConfig):
             return
 
         from . import tasks as _core_outbox_tasks  # noqa: F401
+        from . import knowledge as _knowledge_ops  # noqa: F401
 
         self._configure_bridge()
+        _knowledge_ops.load_knowledge_providers()
         self._install_isolation_guard()
         self._ensure_contract_mode()
         register_bridge_contract_checks()

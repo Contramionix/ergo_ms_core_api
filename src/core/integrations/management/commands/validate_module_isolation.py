@@ -7,8 +7,8 @@ AST-линтер изоляции модулей и ядра.
 
 Правила для core/api/src/:
 - Запрещены любые импорты `modules.*` (доменная логика — только через ModuleBridge).
-- Запрещены литеральные bridge.call/has('module.operation') где module не в whitelist
-  (audit, notifications, core); f-string / переменные не проверяются.
+- Запрещены литеральные bridge.call/has('module.operation') где префикс не в
+  CORE_BRIDGE_PREFIXES; f-string / переменные не проверяются.
 
 Для каждого нарушения выводится файл, строка и рекомендация.
 """

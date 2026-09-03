@@ -483,12 +483,12 @@ class UserPermissionsView(BaseAPIViewAuthMixin, BaseAPIView):
     def get(self, request):
         """Получить все права текущего пользователя"""
         from src.core.cms.adp.services.permissions_snapshot_cache import get_user_permissions_payload
+        from src.core.integrations.session_context import session_claims_from_request
 
-        organization_id = getattr(request, 'organization_id', None)
         return Response(
             get_user_permissions_payload(
                 request.user,
-                organization_id=organization_id,
+                session_claims=session_claims_from_request(request),
             )
         )
 

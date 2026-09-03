@@ -79,6 +79,8 @@ STORAGES = {
 # Media API (CDN / file server)
 MEDIA_API_PUBLIC_BASE_URL = media_api_public_base_url()
 MEDIA_API_INTERNAL_URL = media_api_internal_base_url()
+# Как соседние процессы видят этот media_api (пакеты справки). Пусто — INTERNAL_URL.
+MEDIA_API_ADVERTISE_URL = os.getenv('MEDIA_API_ADVERTISE_URL', '').strip().rstrip('/')
 # Компоненты публичного URL (override; в .env можно не задавать при MEDIA_API_URL)
 MEDIA_API_HOST = effective_media_public_host('localhost')
 MEDIA_API_PORT = int(effective_media_public_port('8003'))

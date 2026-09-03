@@ -11,17 +11,19 @@ Module Bridge — единый механизм межмодульного вз�
     from .models import MyEntity
 
     @bridge.provide_op('<name>.get_user_entity_ids')
-    def _get_user_entity_ids(user):
-        if not user or not getattr(user, 'is_authenticated', False):
+    def _get_user_entity_ids(*, user=None, user_id=None, user_public_id=None, **_):
+        resolved = user  # монолит: ORM; HTTP: собрать по user_public_id
+        if not resolved or not getattr(resolved, 'is_authenticated', False):
             return []
         return list(
             MyEntity.objects
-            .filter(user=user)
+            .filter(user=resolved)
             .values_list('id', flat=True)
         )
 
     @bridge.subscribe_to('adp.permission_check')
-    def _on_permission_check(*, user, module_name, permission_key, **_):
+    def _on_permission_check(*, user=None, user_id=None, user_public_id=None,
+                             module_name, permission_key, **_):
         ...
 
 Пример потребителя (любой другой модуль):
@@ -29,12 +31,13 @@ Module Bridge — единый механизм межмодульного вз�
     from src.core.integrations import bridge
 
     entity_ids = bridge.call(
-        'my_module.get_user_entity_ids',
+        '<name>.get_user_entity_ids',
         user=request.user,
+        user_public_id=str(request.user.public_id),
         default=[],
     )
 
-    if not bridge.has('my_module.get_entity'):
+    if not bridge.has('<name>.get_entity'):
         return Response(...)
 
 Если модуль-провайдер не подключён, bridge.call возвращает default

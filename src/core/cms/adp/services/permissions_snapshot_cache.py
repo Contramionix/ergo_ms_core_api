@@ -12,6 +12,7 @@ from django.core.cache import cache
 
 from src.core.cms.adp.serializers import UserPermissionsSerializer
 from src.core.cms.adp.services.permissions import PermissionService
+from src.core.integrations.session_context import session_claims_key_part
 
 logger = logging.getLogger('core.cms.adp.permissions')
 
@@ -28,11 +29,11 @@ def _version_key(user_id: int) -> str:
     return f'{_VERSION_PREFIX}{user_id}'
 
 
-def _snapshot_key(user_id: int, organization_id: int | None = None) -> str:
+def _snapshot_key(user_id: int, session_claims: dict | None = None) -> str:
     global_ver = int(cache.get(_GLOBAL_VERSION_KEY, 0) or 0)
     user_ver = int(cache.get(_version_key(user_id), 0) or 0)
-    org_part = f'o{organization_id}' if organization_id is not None else 'o0'
-    return f'{_SNAPSHOT_PREFIX}g{global_ver}:u{user_id}:v{user_ver}:{org_part}'
+    scope_part = session_claims_key_part(session_claims)
+    return f'{_SNAPSHOT_PREFIX}g{global_ver}:u{user_id}:v{user_ver}:{scope_part}'
 
 
 def invalidate_user_permissions_snapshot(user_id: int | None) -> None:
@@ -60,34 +61,34 @@ def invalidate_policy_access_caches() -> None:
 
 def get_user_permissions_payload(
     user: User,
-    organization_id: int | None = None,
+    session_claims: dict | None = None,
 ) -> dict:
-    """Сериализованные права; кэш в Django cache с TTL (ключ включает org)."""
+    """Сериализованные права; кэш в Django cache с TTL (ключ включает session-claim)."""
     if user is None or not getattr(user, 'pk', None):
-        return _build_payload(user, organization_id)
+        return _build_payload(user, session_claims)
 
     from src.core.cms.adp.dev_tools.preview import get_active_preview
 
     if get_active_preview() is not None:
-        return _build_payload(user, organization_id)
+        return _build_payload(user, session_claims)
 
     ttl = get_permissions_snapshot_ttl()
     if ttl <= 0:
-        return _build_payload(user, organization_id)
+        return _build_payload(user, session_claims)
 
-    cache_key = _snapshot_key(user.pk, organization_id)
+    cache_key = _snapshot_key(user.pk, session_claims)
     cached = cache.get(cache_key)
     if cached is not None:
         return cached
 
-    payload = _build_payload(user, organization_id)
+    payload = _build_payload(user, session_claims)
     cache.set(cache_key, payload, timeout=ttl)
     return payload
 
 
-def _build_payload(user: User, organization_id: int | None = None) -> dict:
+def _build_payload(user: User, session_claims: dict | None = None) -> dict:
     permissions = PermissionService.get_user_permissions(
         user,
-        organization_id=organization_id,
+        session_claims=session_claims,
     )
     return UserPermissionsSerializer(permissions).data

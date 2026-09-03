@@ -206,6 +206,16 @@ def _start_jupyterlab():
 
 
 def main():
+    from lifecycle.host_process_guard import refuse_unwanted_core_service
+    from lifecycle.host_profile import SERVICE_API
+
+    refused = refuse_unwanted_core_service(
+        SERVICE_API,
+        message_key='host_refuses_jupyter',
+        project_root=PROJECT_ROOT,
+    )
+    if refused:
+        return refused
     _install_django_kernel()
     return _start_jupyterlab()
 

@@ -25,6 +25,7 @@ from src.core.integrations.module_contracts import (
     CORE_COMPOSE_IMPORT_WELCOME_DEFAULTS,
     CORE_COMPOSE_PASSWORD_RESET_CODE,
     CORE_COMPOSE_REGISTRATION_INVITATION,
+    KNOWLEDGE_PACKS_GROUP,
     MEDIA_UPLOAD_QUOTA_POLICIES_GROUP,
     NOTIFICATIONS_EMAIL_CONTEXT_GROUP,
     NOTIFICATIONS_EVENT_DEFINITIONS_GROUP,
@@ -365,6 +366,22 @@ def _validate_upload_quota_policies(errors: list[str]) -> None:
         _expect_callable(data.get('allows'), f'{path}.allows', errors, required=True)
 
 
+def _validate_knowledge_packs(errors: list[str]) -> None:
+    for key, raw in bridge.local_group(KNOWLEDGE_PACKS_GROUP).items():
+        path = _path(KNOWLEDGE_PACKS_GROUP, str(key))
+        data = _expect_dict(raw, path, errors)
+        if data is None:
+            continue
+        owner = _expect_str(data.get('owner'), f'{path}.owner', errors)
+        if owner and owner != str(key):
+            errors.append(f'{path}.owner={owner!r}: должно совпадать с ключом группы')
+        _expect_str(data.get('revision'), f'{path}.revision', errors)
+        media_path = _expect_str(data.get('media_path'), f'{path}.media_path', errors)
+        if media_path and not str(media_path).startswith('knowledge/'):
+            errors.append(f'{path}.media_path: ожидается путь внутри knowledge/')
+        _expect_str(data.get('signer'), f'{path}.signer', errors)
+
+
 _OPTIONAL_CALLABLE_OPS = (
     SESSION_RESTORE_CLAIMS,
     CORE_COMPOSE_REGISTRATION_INVITATION,
@@ -398,6 +415,7 @@ def collect_contract_violations() -> list[str]:
     _validate_notification_events(errors)
     _validate_email_context(errors)
     _validate_upload_quota_policies(errors)
+    _validate_knowledge_packs(errors)
     _validate_optional_callable_ops(errors)
     return errors
 

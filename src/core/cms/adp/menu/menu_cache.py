@@ -13,6 +13,7 @@ from src.core.cms.adp.menu.serializers import MenuSeparatorSerializer
 from src.core.cms.adp.menu.user_menu_builder import build_user_menu_items
 from src.core.cms.adp.middleware.permission_request_cache import get_request_permission_cache
 from src.core.cms.adp.services.permissions import PermissionService
+from src.core.integrations.session_context import session_claims_key_part
 
 logger = logging.getLogger('core.cms.adp.menu')
 
@@ -51,7 +52,7 @@ def _role_groups_key(user_role) -> str:
     return ','.join(str(group_id) for group_id in group_ids) or 'none'
 
 
-def _menu_cache_key(user, organization_id=None) -> str:
+def _menu_cache_key(user, session_claims=None) -> str:
     version = get_menu_cache_version()
     req_cache = get_request_permission_cache()
     frag_key = f'menu_key_frag:{user.pk}'
@@ -63,42 +64,42 @@ def _menu_cache_key(user, organization_id=None) -> str:
         role_id = user_role.role_id if user_role else 'none'
         groups_key = _role_groups_key(user_role)
         req_cache[frag_key] = (role_id, groups_key, is_admin)
-    org_part = f'o{organization_id}' if organization_id is not None else 'o0'
+    scope_part = session_claims_key_part(session_claims)
     return (
-        f'menu:v{version}:u{user.pk}:r{role_id}:g{groups_key}:a{is_admin}:{org_part}'
+        f'menu:v{version}:u{user.pk}:r{role_id}:g{groups_key}:a{is_admin}:{scope_part}'
     )
 
 
-def get_active_menu_separators(user=None, organization_id=None) -> list[dict]:
+def get_active_menu_separators(user=None, session_claims=None) -> list[dict]:
     separators = (
         MenuSeparator.objects.filter(is_active=True)
         .prefetch_related('allowed_roles', 'allowed_role_groups')
         .order_by('before_order')
     )
     if user is not None:
-        checker = MenuAccessChecker(user, organization_id=organization_id)
+        checker = MenuAccessChecker(user, session_claims=session_claims)
         separators = [sep for sep in separators if checker.can_see_separator(sep)]
     return MenuSeparatorSerializer(separators, many=True).data
 
 
-def _build_user_menu_payload(user, organization_id=None) -> dict:
+def _build_user_menu_payload(user, session_claims=None) -> dict:
     return {
-        'menu_items': build_user_menu_items(user, organization_id=organization_id),
-        'separators': get_active_menu_separators(user, organization_id=organization_id),
+        'menu_items': build_user_menu_items(user, session_claims=session_claims),
+        'separators': get_active_menu_separators(user, session_claims=session_claims),
     }
 
 
-def get_user_menu_payload(user, organization_id=None) -> dict:
+def get_user_menu_payload(user, session_claims=None) -> dict:
     """Меню пользователя: из кэша или сборка с записью в кэш."""
     ttl = get_menu_cache_ttl()
     if ttl <= 0:
-        return _build_user_menu_payload(user, organization_id=organization_id)
+        return _build_user_menu_payload(user, session_claims=session_claims)
 
-    cache_key = _menu_cache_key(user, organization_id=organization_id)
+    cache_key = _menu_cache_key(user, session_claims=session_claims)
     cached = cache.get(cache_key)
     if cached is not None:
         return cached
 
-    payload = _build_user_menu_payload(user, organization_id=organization_id)
+    payload = _build_user_menu_payload(user, session_claims=session_claims)
     cache.set(cache_key, payload, timeout=ttl)
     return payload

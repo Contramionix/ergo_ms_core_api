@@ -4,6 +4,7 @@ from rest_framework.response import Response
 
 from src.core.cms.adp.services.session_bootstrap import build_session_bootstrap_payload
 from src.core.cms.adp.services.session_devices import touch_device_activity
+from src.core.integrations.session_context import session_claims_from_request
 from src.core.utils.base.base_views import BaseAPIView, BaseAPIViewAuthMixin
 
 
@@ -31,11 +32,10 @@ class SessionBootstrapView(BaseAPIViewAuthMixin, BaseAPIView):
     )
     def get(self, request):
         touch_device_activity(request)
-        organization_id = getattr(request, 'organization_id', None)
         return Response(
             build_session_bootstrap_payload(
                 request.user,
-                organization_id=organization_id,
+                session_claims=session_claims_from_request(request),
             ),
             status=status.HTTP_200_OK,
         )

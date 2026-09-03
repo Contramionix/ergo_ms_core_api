@@ -13,6 +13,9 @@ _TARGET_DIR_RE = re.compile(
     r'^[a-zA-Z0-9_][a-zA-Z0-9_.-]*(?:/[a-zA-Z0-9_][a-zA-Z0-9_.-]*)*/?$'
 )
 
+# Служебные пакеты справки пишет процесс через MediaClient, не браузер.
+_RESERVED_UPLOAD_PREFIXES = frozenset({'knowledge'})
+
 # Расширения по умолчанию (клиент может запросить подмножество)
 _DEFAULT_ALLOWED_EXTENSIONS = frozenset({
     'jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'ico',
@@ -50,6 +53,10 @@ def normalize_target_dir(target_dir: str | None) -> str:
     parts = [p for p in posix.parts if p not in ('', '.')]
     if not parts:
         return ''
+    if parts[0].lower() in _RESERVED_UPLOAD_PREFIXES:
+        raise ValidationError({
+            'target_dir': 'Каталог knowledge зарезервирован для служебных пакетов',
+        })
     normalized = '/'.join(parts)
     if not _TARGET_DIR_RE.match(normalized):
         raise ValidationError({'target_dir': 'Недопустимый формат каталога'})

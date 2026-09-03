@@ -11,12 +11,14 @@ import json
 import logging
 import threading
 from typing import Any, Callable, Iterator
+from uuid import UUID
 
 import httpx
 from django.conf import settings
 
 from ..exceptions import DuplicateProvider
 from .bind_kwargs import kwargs_accepted_by_handler
+from .user_identity import apply_user_ids
 from ..service_map import (
     all_remote_base_urls,
     build_service_map,
@@ -172,11 +174,16 @@ def _http_client(timeout: float | httpx.Timeout | None = None) -> httpx.Client:
 
 def _self_base_url() -> str | None:
     """URL этого процесса в карте сервисов — не звать сам себя по HTTP."""
+    import os
+
     role = (getattr(settings, 'ERGO_PROCESS_ROLE', '') or '').strip().lower()
     data = build_service_map()
     if role.startswith('module:'):
         name = role.split(':', 1)[1].strip()
         return data['urls'].get(name)
+    # CLI на хосте модулей часто с ролью api — это не процесс ядра.
+    if (os.environ.get('HOST_PROFILE') or '').strip().lower() == 'modules':
+        return None
     if role in ('api', 'core-api', ''):
         core = data.get('core_url')
         return core if core else None
@@ -190,8 +197,12 @@ def _same_base(left: str | None, right: str | None) -> bool:
 
 
 def _core_owned_identity_op(name: str) -> bool:
-    """Роль и сессия живут на ядре: процесс модуля не читает свою cms_adp_*."""
-    return name == SESSION_DEVICE_ACTIVE or name.startswith('adp.')
+    """Роль, сессия и ops ядра живут на ядре: процесс модуля не читает их у себя."""
+    return (
+        name == SESSION_DEVICE_ACTIVE
+        or name.startswith('adp.')
+        or name.startswith('core.')
+    )
 
 
 def _prefer_local_provider(base: str | None, name: str = '') -> bool:
@@ -224,6 +235,8 @@ def _json_safe(value: Any) -> Any:
     """Проверка/нормализация для JSON; несериализуемое → TypeError."""
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
+    if isinstance(value, UUID):
+        return str(value)
     if isinstance(value, (list, tuple)):
         return [_json_safe(v) for v in value]
     if isinstance(value, dict):
@@ -234,9 +247,9 @@ def _json_safe(value: Any) -> Any:
 
 
 def _json_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Оставляет только JSON-примитивы. Объект user и callback по HTTP не едут."""
+    """JSON-примитивы. user-like заменяется на user_id / user_public_id."""
     safe: dict[str, Any] = {}
-    for key, value in kwargs.items():
+    for key, value in apply_user_ids(kwargs).items():
         try:
             safe[str(key)] = _json_safe(value)
         except TypeError:

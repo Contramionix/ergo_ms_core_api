@@ -146,9 +146,12 @@ def iter_group_base_urls(group: str) -> list[str]:
                 urls.append(url)
     else:
         for url in data['urls'].values():
-            if url not in seen:
+            if url and url not in seen:
                 seen.add(url)
                 urls.append(url)
+    core_url = data.get('core_url')
+    if core_url and core_url not in seen:
+        urls.append(core_url)
     return urls
 
 

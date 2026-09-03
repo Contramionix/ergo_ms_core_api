@@ -46,6 +46,17 @@ def _build_env() -> dict:
 
 def main() -> int:
     _ensure_sys_path()
+    from lifecycle.host_process_guard import refuse_unwanted_core_service
+    from lifecycle.host_profile import SERVICE_API
+
+    refused = refuse_unwanted_core_service(
+        SERVICE_API,
+        message_key='host_refuses_core_api',
+        project_root=PROJECT_ROOT,
+    )
+    if refused:
+        return refused
+
     _ensure_api_secret()
 
     from src.config.deploy import (

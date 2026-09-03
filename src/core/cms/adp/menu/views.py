@@ -21,6 +21,7 @@ from .layout_service import (
     sync_placement_from_item,
 )
 from .models import MenuItem, MenuSeparator, MenuAccessLog, MenuLayoutPlacement, MenuSeparatorLayout
+from src.core.integrations.session_context import session_claims_from_request
 from .menu_cache import get_user_menu_payload, invalidate_user_menu_cache
 from .serializers import (
     MenuItemSerializer, MenuItemTreeSerializer, MenuSeparatorSerializer,
@@ -67,9 +68,11 @@ class UserMenuView(BaseMenuAPIView):
         tags=['Menu']
     )
     def get(self, request):
-        organization_id = getattr(request, 'organization_id', None)
         return Response(
-            get_user_menu_payload(request.user, organization_id=organization_id)
+            get_user_menu_payload(
+                request.user,
+                session_claims=session_claims_from_request(request),
+            )
         )
 
 

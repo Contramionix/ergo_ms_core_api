@@ -28,6 +28,10 @@ NOTIFICATIONS_EMAIL_TEMPLATES_GROUP = 'notifications.email_templates'
 # Ядро выбирает политику по target_dir; media_api считает по классу из токена.
 MEDIA_UPLOAD_QUOTA_POLICIES_GROUP = 'media.upload_quota_policies'
 
+# Опубликованные пакеты справки в media_api: JSON
+# {owner, revision, media_path, signer}. Байты лежат в knowledge/<owner>/<revision>/.
+KNOWLEDGE_PACKS_GROUP = 'knowledge.packs'
+
 # --- Ops (bridge.provide_op / call) ---
 
 NOTIFICATIONS_CREATE = 'notifications.create'
@@ -35,6 +39,13 @@ NOTIFICATIONS_RECALL = 'notifications.recall'
 # Динамические ops: f'{PREFIX}{module}'
 NOTIFICATIONS_RENDER_EMAIL_PREFIX = 'notifications.render_email.'
 NOTIFICATIONS_FILTER_EVENTS_PREFIX = 'notifications.filter_events_for_user.'
+# Пакет справки ядра и подпись чтения с диска этого процесса.
+CORE_KNOWLEDGE_PACK = 'core.knowledge.pack'
+CORE_KNOWLEDGE_SIGN_READ = 'core.knowledge.sign_read'
+# Меню и каталог модулей с ядра (не с диска процесса модуля).
+CORE_KNOWLEDGE_USER_CAPABILITIES = 'core.knowledge.user_capabilities'
+# Вынесенный модуль: f'{PREFIX}{name}' — только knowledge/<name>/ на своём media.
+KNOWLEDGE_SIGN_READ_PREFIX = 'knowledge.sign_read.'
 
 # --- Events (bridge.subscribe_to / emit / emit_first) ---
 
@@ -87,4 +98,5 @@ CORE_BRIDGE_PREFIXES = (
     'menu.',
     'adp.',
     'media.',
+    'knowledge.',
 )

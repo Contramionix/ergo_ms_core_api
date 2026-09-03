@@ -51,12 +51,12 @@ def _serialize_profile(user) -> dict:
     return data
 
 
-def build_permissions_snapshot_payload(user, organization_id=None) -> dict:
+def build_permissions_snapshot_payload(user, session_claims=None) -> dict:
     """Тот же контракт, что GET /api/cms/adp/my-permissions/."""
-    return get_user_permissions_payload(user, organization_id=organization_id)
+    return get_user_permissions_payload(user, session_claims=session_claims)
 
 
-def build_session_bootstrap_payload(user, organization_id=None) -> dict:
+def build_session_bootstrap_payload(user, session_claims=None) -> dict:
     """Агрегированные данные для холодного старта клиента."""
     user = (
         User.objects
@@ -68,7 +68,7 @@ def build_session_bootstrap_payload(user, organization_id=None) -> dict:
     return {
         'user': CMSUserMenuSerializer(user).data,
         'menu': (
-            get_user_menu_payload(user, organization_id=organization_id)
+            get_user_menu_payload(user, session_claims=session_claims)
             if user is not None
             else {'menu_items': [], 'separators': []}
         ),
@@ -76,7 +76,7 @@ def build_session_bootstrap_payload(user, organization_id=None) -> dict:
         'avatar_url': _get_user_avatar_url(user) if user is not None else None,
         'access_to_panel': PermissionService.can_access_admin_panel(user),
         'permissions': (
-            build_permissions_snapshot_payload(user, organization_id=organization_id)
+            build_permissions_snapshot_payload(user, session_claims=session_claims)
             if user is not None
             else None
         ),

@@ -15,6 +15,7 @@ import psutil
 from _common import (
     API_DIR,
     CACHE_DIR,
+    PROJECT_ROOT,
     ensure_caches,
     exec_celery,
     is_celery_process,
@@ -71,6 +72,18 @@ def main() -> int:
     opts, _unknown = parser.parse_known_args()
 
     module_name = (opts.module or '').strip()
+
+    if not module_name:
+        from lifecycle.host_process_guard import refuse_unwanted_core_service
+        from lifecycle.host_profile import SERVICE_BEAT
+
+        refused = refuse_unwanted_core_service(
+            SERVICE_BEAT,
+            message_key='host_refuses_core_beat',
+            project_root=PROJECT_ROOT,
+        )
+        if refused:
+            return refused
 
     if opts.verbose:
         os.environ['ERGO_CELERY_STARTUP_VERBOSE'] = 'true'

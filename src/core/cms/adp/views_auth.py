@@ -464,7 +464,14 @@ class UserAuthorizationView(BaseAPIViewPublicMixin):
                 if skip_restore:
                     restore_claims = {}
                 else:
-                    restore_claims = bridge.call(SESSION_RESTORE_CLAIMS, user=user) or {}
+                    public_id = getattr(user, 'public_id', None)
+                    restore_claims = bridge.call(
+                        SESSION_RESTORE_CLAIMS,
+                        user=user,
+                        user_id=user.pk,
+                        user_public_id=str(public_id) if public_id else '',
+                        default={},
+                    ) or {}
                     if not isinstance(restore_claims, dict):
                         restore_claims = {}
 

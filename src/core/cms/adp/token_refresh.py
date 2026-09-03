@@ -22,6 +22,7 @@ from src.core.cms.adp.services.jwt_platform_claims import (
     copy_platform_auth_claims,
 )
 from src.core.cms.adp.services.session_bootstrap import build_session_bootstrap_payload
+from src.core.integrations.session_context import session_claims_from_mapping
 from src.core.cms.adp.services.session_devices import (
     bind_device_to_refresh_token,
     is_device_session_active,
@@ -141,14 +142,9 @@ class DeviceBoundTokenRefreshView(TokenRefreshView):
             user = get_user_model().objects.filter(pk=user_id).first()
             if user is None:
                 return
-            organization_id = refresh.payload.get('organization_id')
-            try:
-                organization_id = int(organization_id) if organization_id is not None else None
-            except (TypeError, ValueError):
-                organization_id = None
             response.data['session_bootstrap'] = build_session_bootstrap_payload(
                 user,
-                organization_id=organization_id,
+                session_claims=session_claims_from_mapping(refresh.payload),
             )
         except Exception:
             logger.exception('Не удалось вложить session_bootstrap в token-refresh')

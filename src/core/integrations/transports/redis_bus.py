@@ -21,19 +21,12 @@ from uuid import UUID
 
 from django.conf import settings
 
+from .user_identity import apply_user_ids, is_user_like
+
 logger = logging.getLogger('integrations.bridge.redis')
 
 _CHANNEL_PREFIX = 'ergo:bridge:events:'
 _listener_lock = threading.Lock()
-_SKIP_PAYLOAD_KEYS = frozenset({'user', 'user_id', 'user_public_id'})
-
-
-def _is_user_like(value: Any) -> bool:
-    if value is None or isinstance(value, (str, bytes, int, float, bool, dict, list, tuple)):
-        return False
-    if getattr(value, 'pk', None) is None and getattr(value, 'public_id', None) is None:
-        return False
-    return hasattr(value, 'is_authenticated')
 
 
 def _jsonable(value: Any) -> Any:
@@ -52,36 +45,15 @@ def _jsonable(value: Any) -> Any:
 
 def _event_payload_for_redis(payload: dict[str, Any]) -> dict[str, Any]:
     """Копия payload для pub/sub: user → идентификаторы, остальное — JSON-примитивы."""
-    safe: dict[str, Any] = {}
-    user = payload.get('user')
-    user_id = payload.get('user_id')
-    user_public_id = payload.get('user_public_id')
-    if _is_user_like(user):
-        if user_id is None:
-            user_id = getattr(user, 'pk', None)
-        if not user_public_id:
-            public_id = getattr(user, 'public_id', None)
-            user_public_id = str(public_id) if public_id else None
-        user = None
-    elif user is not None:
+    prepared = apply_user_ids(payload)
+    if payload.get('user') is not None and not is_user_like(payload.get('user')):
         try:
-            user = _jsonable(user)
+            prepared['user'] = _jsonable(payload.get('user'))
         except TypeError:
-            user = None
+            prepared.pop('user', None)
 
-    if user is not None:
-        safe['user'] = user
-    if user_id is not None:
-        try:
-            safe['user_id'] = int(user_id)
-        except (TypeError, ValueError):
-            pass
-    if user_public_id:
-        safe['user_public_id'] = str(user_public_id)
-
-    for key, value in payload.items():
-        if key in _SKIP_PAYLOAD_KEYS:
-            continue
+    safe: dict[str, Any] = {}
+    for key, value in prepared.items():
         try:
             safe[str(key)] = _jsonable(value)
         except TypeError:

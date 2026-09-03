@@ -375,15 +375,16 @@ class PermissionService:
         return [group_id for group_id in role_group_ids if group_id not in excluded]
 
     @staticmethod
-    def _session_scoped_module_permissions(user: User, organization_id: int | None):
+    def _session_scoped_module_permissions(user: User, session_claims: dict | None):
         """Доп. ModulePermission из модулей для текущего session-scope."""
-        if not organization_id or not user:
+        claims = dict(session_claims or {})
+        if not claims or not user:
             return []
         extra = []
         for result in bridge.emit(
             ADP_SESSION_SCOPED_MODULE_PERMISSIONS,
             user=user,
-            organization_id=organization_id,
+            **claims,
         ):
             if not result:
                 continue
@@ -392,15 +393,16 @@ class PermissionService:
         return extra
 
     @staticmethod
-    def _session_scoped_denied_permissions(user: User, organization_id: int | None) -> set[tuple[str, str]]:
+    def _session_scoped_denied_permissions(user: User, session_claims: dict | None) -> set[tuple[str, str]]:
         """Пары (module_name, permission_key), которые модули вычитают из snapshot."""
         denied: set[tuple[str, str]] = set()
-        if not organization_id or not user:
+        claims = dict(session_claims or {})
+        if not claims or not user:
             return denied
         for result in bridge.emit(
             ADP_SESSION_SCOPED_DENIED_PERMISSIONS,
             user=user,
-            organization_id=organization_id,
+            **claims,
         ):
             if not result:
                 continue
@@ -626,12 +628,12 @@ class PermissionService:
         return not PermissionService._api_deny_covers_module(user_role, [], module_name)
 
     @staticmethod
-    def get_user_permissions(user: User, organization_id: int | None = None) -> Dict:
+    def get_user_permissions(user: User, session_claims: dict | None = None) -> Dict:
         """
         Получить все права пользователя.
 
-        organization_id — id текущего session-scope: фильтр grants через bridge
-        и доп. effective ModulePermission от модулей.
+        session_claims — произвольный dict JWT session-claim текущего scope.
+        Ядро не знает ключи: модули читают свои имена из kwargs моста.
         """
         user_role = PermissionService.get_user_role(user)
         default_view_grants = adp_default_view_grants()
@@ -706,10 +708,10 @@ class PermissionService:
 
         permission_user = resolve_effective_user(user)
         module_permissions.extend(
-            PermissionService._session_scoped_module_permissions(permission_user, organization_id)
+            PermissionService._session_scoped_module_permissions(permission_user, session_claims)
         )
 
-        denied = PermissionService._session_scoped_denied_permissions(permission_user, organization_id)
+        denied = PermissionService._session_scoped_denied_permissions(permission_user, session_claims)
         if denied:
             module_permissions = [
                 perm for perm in module_permissions
