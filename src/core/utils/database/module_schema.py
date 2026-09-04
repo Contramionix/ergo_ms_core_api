@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -97,41 +98,59 @@ def installed_module_schema_names() -> list[str]:
     return seen
 
 
-def search_path_for_process(
-    *,
-    process_role: str = '',
-    process_modules: str = '',
-) -> str:
-    """
-    search_path чтения процесса.
+def _colocated_module_dir_names() -> list[str]:
+    """Имена папок modules/<name>, которые colocate грузит в этот процесс."""
+    deployment = str(project_root() / 'core' / 'deployment')
+    if deployment not in sys.path:
+        sys.path.insert(0, deployment)
+    from lifecycle.modules.colocate import colocated_module_names_from_env
 
-    Монолит: core, затем все m_*. Процесс модуля: своя схема, затем core.
-    public в search_path нет. CREATE TABLE идёт в схему приложения
-    (Migration.apply), не в первую схему этого пути.
-    """
-    role = (process_role or os.environ.get('ERGO_PROCESS_ROLE', '') or '').strip()
-    explicit = (process_modules or os.environ.get('PROCESS_MODULES', '') or '').strip()
-    extra = installed_module_schema_names()
+    return sorted(colocated_module_names_from_env(os.environ))
 
-    if role.startswith('module:'):
-        name = role.split(':', 1)[1].strip()
-        own = module_schema_name(name)
-        parts = [own, CORE_SCHEMA]
-        # Без пробелов: libpq режет `-c search_path=` по запятой.
-        return ','.join(parts)
 
-    if explicit:
-        names = [n.strip() for n in explicit.split(',') if n.strip()]
-        own = [module_schema_name(n) for n in names]
-        parts = [*own, CORE_SCHEMA]
-        return ','.join(parts)
-
-    parts = [CORE_SCHEMA, *extra]
+def _dedupe_search_path(parts: Sequence[str]) -> str:
+    """Без пробелов: libpq режет `-c search_path=` по запятой."""
     seen: list[str] = []
     for item in parts:
         if item and item not in seen:
             seen.append(item)
     return ','.join(seen)
+
+
+def search_path_for_process(
+    *,
+    process_role: str = '',
+    process_modules: str = '',
+    colocated_modules: Sequence[str] | None = None,
+) -> str:
+    """
+    search_path чтения процесса.
+
+    Монолит: core, затем все m_*. Процесс модуля: своя схема, схемы соседей
+    на этой машине (BRIDGE_COLOCATE), затем core. Без соседей в пути локальный
+    handler colocate не видит чужие таблицы (relation does not exist).
+    public в search_path нет. CREATE TABLE идёт в схему приложения
+    (Migration.apply), не в первую схему этого пути.
+    """
+    role = (process_role or os.environ.get('ERGO_PROCESS_ROLE', '') or '').strip()
+    explicit = (process_modules or os.environ.get('PROCESS_MODULES', '') or '').strip()
+    if colocated_modules is None:
+        siblings = [module_schema_name(name) for name in _colocated_module_dir_names()]
+    else:
+        siblings = [module_schema_name(name) for name in colocated_modules]
+
+    if role.startswith('module:'):
+        name = role.split(':', 1)[1].strip()
+        own = module_schema_name(name)
+        return _dedupe_search_path([own, *siblings, CORE_SCHEMA])
+
+    if explicit:
+        names = [n.strip() for n in explicit.split(',') if n.strip()]
+        own = [module_schema_name(n) for n in names]
+        return _dedupe_search_path([*own, *siblings, CORE_SCHEMA])
+
+    extra = installed_module_schema_names()
+    return _dedupe_search_path([CORE_SCHEMA, *extra])
 
 
 def apply_search_path_options(databases: Mapping[str, dict]) -> dict:

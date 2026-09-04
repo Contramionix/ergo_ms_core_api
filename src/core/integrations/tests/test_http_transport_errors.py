@@ -76,3 +76,31 @@ class HttpTransportErrorTests(SimpleTestCase):
             ):
                 with self.assertRaises(BridgeUnavailable):
                     transport.has('demo.op')
+
+    def test_colocated_sibling_uses_local_handler(self):
+        transport = HttpTransport()
+        transport.provide('demo.op', lambda **kwargs: kwargs.get('n', 0) + 1)
+        with patch(
+            'src.core.integrations.transports.http.resolve_op_base_url',
+            return_value='http://127.0.0.1:8124',
+        ):
+            with patch(
+                'src.core.integrations.transports.http._self_base_url',
+                return_value='http://127.0.0.1:8123',
+            ):
+                with patch(
+                    'src.core.integrations.transports.http.is_colocated_base_url',
+                    return_value=True,
+                ):
+                    with patch(
+                        'src.core.integrations.transports.http._http_send',
+                    ) as send:
+                        with patch(
+                            'src.core.integrations.transports.http.settings'
+                        ) as settings:
+                            settings.ERGO_PROCESS_ROLE = 'module:demo_mod'
+                            self.assertEqual(
+                                transport.call('demo.op', (), {'n': 4}, 'MISSING'),
+                                5,
+                            )
+                            send.assert_not_called()

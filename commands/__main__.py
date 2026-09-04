@@ -246,8 +246,22 @@ def _run_full_main() -> None:
 
     command_class = commands.get(command_name)
     if not command_class:
-        print_unknown_command_help(command_name, commands)
-        sys.exit(1)
+        from commands.discovery import bind_process_to_command_owner
+
+        owner = bind_process_to_command_owner(command_name)
+        if owner:
+            logger.info(
+                'Команда %s: процесс модуля %s (ERGO_PROCESS_ROLE=module:%s)',
+                command_name,
+                owner,
+                owner,
+            )
+            discovery.rediscover()
+            commands = get_commands()
+            command_class = commands.get(command_name)
+        if not command_class:
+            print_unknown_command_help(command_name, commands)
+            sys.exit(1)
 
     try:
         command_instance = command_class()

@@ -149,5 +149,73 @@ class CommandDiscovery:
             self.discover()
         return self._commands.copy()
 
+    def rediscover(self) -> Dict[str, Type[PoetryCommand]]:
+        """Сбрасывает кэш после смены ERGO_PROCESS_ROLE."""
+        self._commands = {}
+        return self.discover()
+
+
+def _reset_process_app_caches() -> None:
+    """Каталог модулей и discovered_apps читают роль процесса один раз."""
+    try:
+        from src.core.utils.module_registry import reset_cache
+
+        reset_cache()
+    except ImportError:
+        pass
+    try:
+        from src.core.utils.auto_api.discovered_apps_cache import (
+            clear_discovered_apps_memory_cache,
+        )
+
+        clear_discovered_apps_memory_cache()
+    except ImportError:
+        pass
+
+
+def bind_process_to_command_owner(command_name: str) -> Optional[str]:
+    """
+    Если команда живёт в одном вынесенном модуле, ставит роль ``module:<name>``.
+
+    Иначе Django на стороне ядра в microservice не видит management-команду модуля.
+    """
+    if (os.environ.get('ERGO_PROCESS_ROLE') or '').strip():
+        return None
+
+    _ensure_path()
+    deployment = Path(__file__).resolve().parents[2] / 'deployment'
+    if str(deployment) not in sys.path:
+        sys.path.insert(0, str(deployment))
+    try:
+        from lifecycle.modules.cli_commands import find_modules_owning_management_command
+        from src.config.settings.base import MODULES_DIR
+        from src.core.utils.module_registry import (
+            get_disabled_modules,
+            is_module_disabled,
+            is_module_loadable_in_process,
+        )
+    except ImportError:
+        return None
+
+    disabled = list(get_disabled_modules())
+
+    owners = find_modules_owning_management_command(
+        command_name,
+        Path(MODULES_DIR),
+        disabled=disabled,
+    )
+    if len(owners) != 1:
+        return None
+
+    owner = owners[0]
+    if is_module_disabled(owner):
+        return None
+    if is_module_loadable_in_process(owner):
+        return None
+
+    os.environ['ERGO_PROCESS_ROLE'] = f'module:{owner}'
+    _reset_process_app_caches()
+    return owner
+
 
 discovery = CommandDiscovery()

@@ -594,15 +594,29 @@ def collect_pack_descriptors() -> dict[str, dict[str, str]]:
 
 def _http_get_knowledge_bytes(url: str) -> bytes:
     from urllib.parse import urlparse
-    from urllib.request import urlopen
+
+    from src.core.utils.http_proxy import urllib_opener
 
     parsed = urlparse(url)
     if parsed.scheme not in ('http', 'https'):
         raise ValueError('Недопустимый URL пакета справки')
     if '/serve/knowledge/' not in (parsed.path or ''):
         raise ValueError('URL не указывает на пакет справки')
-    with urlopen(url, timeout=30) as response:  # noqa: S310 — схема уже ограничена
+    opener = urllib_opener()
+    with opener.open(url, timeout=30) as response:  # noqa: S310 — схема уже ограничена
         return response.read()
+
+
+def _pack_download_error_text(url: str, exc: BaseException) -> str:
+    from urllib.error import HTTPError, URLError
+    from urllib.parse import urlparse
+
+    host = urlparse(url).netloc or '?'
+    if isinstance(exc, HTTPError):
+        return f'HTTP {exc.code} с {host}'
+    if isinstance(exc, URLError):
+        return f'{exc.reason} ({host})'
+    return f'{exc} ({host})'
 
 
 def _read_pack_file(storage_path: str, *, signer: str) -> bytes | None:
@@ -620,10 +634,11 @@ def _read_pack_file(storage_path: str, *, signer: str) -> bytes | None:
     if not isinstance(signed, dict) or not signed.get('url'):
         logger.warning('Нет подписи для пакета %s (signer=%s)', storage_path, signer)
         return None
+    url = str(signed['url'])
     try:
-        return _http_get_knowledge_bytes(str(signed['url']))
-    except Exception:
-        logger.warning('Не удалось скачать %s', storage_path, exc_info=True)
+        return _http_get_knowledge_bytes(url)
+    except Exception as exc:
+        logger.warning('Не удалось скачать %s: %s', storage_path, _pack_download_error_text(url, exc))
         return None
 
 

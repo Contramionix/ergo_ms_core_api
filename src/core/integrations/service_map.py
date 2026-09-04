@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -17,22 +18,20 @@ from typing import Any
 import yaml
 from django.conf import settings
 
+from src.config.paths import SYSTEM_DIR
+
+_DEPLOYMENT_DIR = SYSTEM_DIR / 'core' / 'deployment'
+if str(_DEPLOYMENT_DIR) not in sys.path:
+    sys.path.insert(0, str(_DEPLOYMENT_DIR))
+
+from lifecycle.modules.colocate import (  # noqa: E402
+    is_colocated_url,
+    parse_bridge_colocate,
+    parse_service_urls,
+    this_process_hosts,
+)
+
 logger = logging.getLogger('integrations.bridge')
-
-
-def parse_service_urls(raw: str = '') -> dict[str, str]:
-    """``<name>=http://host:port,<other>=http://…`` → dict."""
-    result: dict[str, str] = {}
-    for part in (raw or '').split(','):
-        part = part.strip()
-        if not part or '=' not in part:
-            continue
-        name, url = part.split('=', 1)
-        name = name.strip()
-        url = url.strip().rstrip('/')
-        if name and url:
-            result[name] = url
-    return result
 
 
 def _modules_dir() -> Path | None:
@@ -158,3 +157,31 @@ def iter_group_base_urls(group: str) -> list[str]:
 def all_remote_base_urls() -> list[str]:
     data = build_service_map()
     return list(dict.fromkeys(data['urls'].values()))
+
+
+def is_colocate_enabled() -> bool:
+    return (
+        parse_bridge_colocate(
+            getattr(settings, 'BRIDGE_COLOCATE', 'auto') or '',
+            transport=getattr(settings, 'BRIDGE_TRANSPORT', 'local') or '',
+        )
+        == 'on'
+    )
+
+
+def is_colocated_base_url(url: str | None) -> bool:
+    """Сосед на этой машине: loopback или тот же хост, что у процесса."""
+    if not url or not is_colocate_enabled():
+        return False
+    import os
+
+    self_url = (getattr(settings, 'BRIDGE_CORE_URL', '') or '').strip() or None
+    role = (getattr(settings, 'ERGO_PROCESS_ROLE', '') or '').strip().lower()
+    data = build_service_map()
+    if role.startswith('module:'):
+        name = role.split(':', 1)[1].strip()
+        self_url = data['urls'].get(name) or self_url
+    elif role in ('api', 'core-api', ''):
+        self_url = data.get('core_url') or self_url
+    hosts = this_process_hosts(os.environ, self_url=self_url)
+    return is_colocated_url(url, self_hosts=hosts)

@@ -6,7 +6,9 @@ from django.test import SimpleTestCase
 
 from src.core.utils.knowledge_pack import (
     CORE_OWNER,
+    _http_get_knowledge_bytes,
     _is_core_process,
+    _pack_download_error_text,
     assert_knowledge_path,
     collect_module_documents,
     compute_revision,
@@ -42,6 +44,44 @@ class KnowledgePackPathTests(SimpleTestCase):
             assert_knowledge_path('avatars/1.png')
         with self.assertRaises(ValidationError):
             assert_knowledge_path('knowledge/other/file.md', owner='core')
+
+    def test_download_error_does_not_leak_signed_url(self):
+        from urllib.error import HTTPError, URLError
+
+        url = 'http://10.0.0.5:8003/serve/knowledge/core/rev/manifest.json?signature=secret'
+        http_exc = HTTPError(url, 502, 'Bad Gateway', hdrs=None, fp=None)
+        self.assertEqual(_pack_download_error_text(url, http_exc), 'HTTP 502 с 10.0.0.5:8003')
+        self.assertNotIn('signature', _pack_download_error_text(url, http_exc))
+        net_exc = URLError('Connection refused')
+        self.assertEqual(
+            _pack_download_error_text(url, net_exc),
+            'Connection refused (10.0.0.5:8003)',
+        )
+
+    def test_knowledge_download_uses_env_proxy_setting(self):
+        class _FakeOpener:
+            def open(self, url, timeout=None):
+                class _Resp:
+                    def read(self):
+                        return b'ok'
+
+                    def __enter__(self):
+                        return self
+
+                    def __exit__(self, *args):
+                        return False
+
+                return _Resp()
+
+        fake = _FakeOpener()
+        with patch(
+            'src.core.utils.http_proxy.urllib_opener',
+            return_value=fake,
+        ):
+            body = _http_get_knowledge_bytes(
+                'http://10.0.0.5:8003/serve/knowledge/core/rev/manifest.json'
+            )
+        self.assertEqual(body, b'ok')
 
     def test_sign_op_names(self):
         self.assertEqual(knowledge_sign_read_op('core'), 'core.knowledge.sign_read')

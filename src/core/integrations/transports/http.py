@@ -22,6 +22,7 @@ from .payload import prepare_outgoing_kwargs
 from ..service_map import (
     all_remote_base_urls,
     build_service_map,
+    is_colocated_base_url,
     iter_group_base_urls,
     resolve_op_base_url,
 )
@@ -159,14 +160,16 @@ def close_shared_http_client() -> None:
 
 def _http_client(timeout: float | httpx.Timeout | None = None) -> httpx.Client:
     # Один клиент на процесс: keep-alive между bridge.call, без сокета на каждый op.
-    # trust_env=False: http_proxy/HTTP_PROXY не должны перехватывать
-    # /internal/bridge/* на private LAN (иначе ReadTimeout через прокси).
+    # ERGO_HTTP_TRUST_ENV=false (по умолчанию): HTTP_PROXY не перехватывает
+    # /internal/bridge/* на private LAN.
+    from src.core.utils.http_proxy import http_trust_env
+
     global _shared_client
     with _client_lock:
         if _shared_client is None or _shared_client.is_closed:
             _shared_client = httpx.Client(
                 timeout=_stream_timeout() if timeout is None else timeout,
-                trust_env=False,
+                trust_env=http_trust_env(),
                 limits=httpx.Limits(max_keepalive_connections=20, max_connections=40),
             )
         return _shared_client
@@ -206,29 +209,39 @@ def _core_owned_identity_op(name: str) -> bool:
 
 
 def _prefer_local_provider(base: str | None, name: str = '') -> bool:
-    """Локальный handler только если этот процесс — владелец op.
+    """Локальный handler, если этот процесс владеет op или сосед на этой машине.
 
     На ``module:<name>`` ядро всё равно регистрирует ``session.device_active``
     и ``adp.*``: пользователи и устройства живут на ядре, не в БД модуля.
+    Их не вызываем локально, если ядро на другом хосте.
     """
     role = (getattr(settings, 'ERGO_PROCESS_ROLE', '') or '').strip().lower()
-    if not role.startswith('module:'):
-        return True
     if _core_owned_identity_op(name):
+        if not role.startswith('module:'):
+            return True
         if not base:
             return False
         return _same_base(base, _self_base_url())
+    if not role.startswith('module:'):
+        return True
     if not base:
         return True
-    return _same_base(base, _self_base_url())
+    if _same_base(base, _self_base_url()):
+        return True
+    return is_colocated_base_url(base)
 
 
 def _remote_bases_for_group(group: str) -> list[str]:
     self_url = (_self_base_url() or '').rstrip('/')
     bases = iter_group_base_urls(group) or all_remote_base_urls()
-    if not self_url:
-        return bases
-    return [u for u in bases if u.rstrip('/') != self_url]
+    result: list[str] = []
+    for url in bases:
+        if self_url and url.rstrip('/') == self_url:
+            continue
+        if is_colocated_base_url(url):
+            continue
+        result.append(url)
+    return result
 
 
 def _json_safe(value: Any) -> Any:

@@ -16,6 +16,13 @@
     local  — in-process (по умолчанию)
     http   — hybrid: local provide + HTTP RPC на владельца op
 
+``BRIDGE_COLOCATE``:
+
+    auto — при http соседи на этой машине (loopback / тот же хост) грузятся
+           в процесс и вызываются без HTTP; другой сервер остаётся HTTP
+    on   — то же принудительно
+    off  — каждый вынесенный модуль только через HTTP, даже на 127.0.0.1
+
 ``BRIDGE_EVENT_BUS``:
 
     local  — in-process (по умолчанию)
@@ -39,8 +46,11 @@ BRIDGE_CONTRACTS = env.str('BRIDGE_CONTRACTS', default='warn').strip().lower()
 BRIDGE_INTERNAL_TOKEN = env.str('BRIDGE_INTERNAL_TOKEN', default='').strip()
 BRIDGE_SERVICE_URLS = env.str('BRIDGE_SERVICE_URLS', default='').strip()
 BRIDGE_CORE_URL = env.str('BRIDGE_CORE_URL', default='').strip()
+BRIDGE_COLOCATE = env.str('BRIDGE_COLOCATE', default='auto').strip().lower()
 BRIDGE_HTTP_TIMEOUT = env.float('BRIDGE_HTTP_TIMEOUT', default=10.0)
 BRIDGE_HTTP_RETRIES = env.int('BRIDGE_HTTP_RETRIES', default=2)
+# false — внутренний HTTP (мост, пакеты справки) без HTTP_PROXY; true — HTTP_PROXY + NO_PROXY
+ERGO_HTTP_TRUST_ENV = env.bool('ERGO_HTTP_TRUST_ENV', default=False)
 BRIDGE_REDIS_DB = env.int('BRIDGE_REDIS_DB', default=4)
 # jwt_claims: несколько процессов модуля с одного IP бьют session.device_active
 # на каждый запрос. 60/minute на ядре даёт 429 и ложный «сессия завершена».

@@ -58,3 +58,7 @@ if modules_env_vars:
         )
         for var in overridden_vars:
             logger.warning(' - %s', var)
+
+from no_proxy_hosts import apply_effective_no_proxy_to_environ  # noqa: E402
+
+apply_effective_no_proxy_to_environ()
