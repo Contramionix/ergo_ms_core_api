@@ -42,6 +42,7 @@ class Command(BaseCommand):
             move_extension_to_schema,
             public_user_object_count,
             relation_exists,
+            retarget_public_auth_user_foreign_keys,
             revoke_create_on_public,
             schema_exists,
             set_relation_schema,
@@ -135,6 +136,14 @@ class Command(BaseCommand):
             self.stdout.write(
                 f'skipped {skipped_existing} relation(s) already in {CORE_SCHEMA}'
             )
+
+        if not dry:
+            retargeted = retarget_public_auth_user_foreign_keys(connection)
+            if retargeted:
+                self.stdout.write(
+                    f'retargeted {len(retargeted)} FK(s) public.auth_user '
+                    f'-> {CORE_SCHEMA}.auth_user'
+                )
 
         if dry:
             self.stdout.write(self.style.SUCCESS(f'moved {moved} relation(s)'))
