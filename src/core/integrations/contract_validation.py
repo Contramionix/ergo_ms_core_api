@@ -27,6 +27,7 @@ from src.core.integrations.module_contracts import (
     CORE_COMPOSE_REGISTRATION_INVITATION,
     KNOWLEDGE_PACKS_GROUP,
     MEDIA_UPLOAD_QUOTA_POLICIES_GROUP,
+    MENU_CATALOG_GROUP,
     NOTIFICATIONS_EMAIL_CONTEXT_GROUP,
     NOTIFICATIONS_EVENT_DEFINITIONS_GROUP,
     SESSION_CLAIMS_GROUP,
@@ -382,6 +383,32 @@ def _validate_knowledge_packs(errors: list[str]) -> None:
         _expect_str(data.get('signer'), f'{path}.signer', errors)
 
 
+def _validate_menu_catalogs(errors: list[str]) -> None:
+    for key, raw in bridge.local_group(MENU_CATALOG_GROUP).items():
+        path = _path(MENU_CATALOG_GROUP, str(key))
+        if callable(raw):
+            continue
+        data = _expect_dict(raw, path, errors)
+        if data is None:
+            continue
+        module_name = data.get('module') or key
+        _expect_str(module_name, f'{path}.module', errors)
+        source = _expect_str(data.get('module_source'), f'{path}.module_source', errors)
+        if source and not str(source).startswith('modules/'):
+            errors.append(f'{path}.module_source: ожидается modules/<name>')
+        items = data.get('items')
+        separators = data.get('separators')
+        if items is None and separators is None:
+            errors.append(f'{path}: нужен items или separators')
+            continue
+        if items is not None and not isinstance(items, (list, tuple)):
+            errors.append(f'{path}.items: ожидается list, получено {type(items).__name__}')
+        if separators is not None and not isinstance(separators, (list, tuple)):
+            errors.append(
+                f'{path}.separators: ожидается list, получено {type(separators).__name__}'
+            )
+
+
 _OPTIONAL_CALLABLE_OPS = (
     SESSION_RESTORE_CLAIMS,
     CORE_COMPOSE_REGISTRATION_INVITATION,
@@ -416,6 +443,7 @@ def collect_contract_violations() -> list[str]:
     _validate_email_context(errors)
     _validate_upload_quota_policies(errors)
     _validate_knowledge_packs(errors)
+    _validate_menu_catalogs(errors)
     _validate_optional_callable_ops(errors)
     return errors
 

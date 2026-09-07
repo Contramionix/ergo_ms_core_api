@@ -49,5 +49,7 @@ class AdpConfig(AppConfig):
 
         from src.core.cms.adp import signals  # noqa: F401
         from src.core.cms.adp import integrations as _adp_integrations  # noqa: F401
+        from src.core.cms.adp.menu.catalog_export import register_process_menu_catalog
 
         signals.connect_user_signals()
+        register_process_menu_catalog()
