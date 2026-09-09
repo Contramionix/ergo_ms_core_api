@@ -132,7 +132,7 @@ def resolve_op_base_url(op_name: str) -> str | None:
 
 
 def iter_group_base_urls(group: str) -> list[str]:
-    """URL сервисов, которые могут отдавать провайдеров группы (+ все split URLs как fallback)."""
+    """URL сервисов группы, затем остальные из карты — папки модуля на ядре может не быть."""
     data = build_service_map()
     owners = data['group_owners'].get(group)
     urls: list[str] = []
@@ -143,11 +143,10 @@ def iter_group_base_urls(group: str) -> list[str]:
             if url and url not in seen:
                 seen.add(url)
                 urls.append(url)
-    else:
-        for url in data['urls'].values():
-            if url and url not in seen:
-                seen.add(url)
-                urls.append(url)
+    for url in data['urls'].values():
+        if url and url not in seen:
+            seen.add(url)
+            urls.append(url)
     core_url = data.get('core_url')
     if core_url and core_url not in seen:
         urls.append(core_url)

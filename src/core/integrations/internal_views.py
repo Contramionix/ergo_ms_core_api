@@ -156,6 +156,12 @@ def _json_safe_providers(providers: dict[str, Any]) -> dict[str, Any]:
     """Оставляет только JSON-сериализуемые значения группы."""
     safe: dict[str, Any] = {}
     for key, obj in providers.items():
+        if callable(obj):
+            try:
+                obj = obj()
+            except Exception:
+                logger.exception('internal bridge all: provider %s failed', key)
+                continue
         try:
             json.dumps(obj, default=None)
         except (TypeError, ValueError):

@@ -196,6 +196,123 @@ def move_extension_to_schema(connection, extname: str, dest: str) -> None:
         cursor.execute(f'ALTER EXTENSION {extname} SET SCHEMA {q_dest}')
 
 
+_FK_ACTION_SQL = {
+    'a': '',
+    'r': ' RESTRICT',
+    'c': ' CASCADE',
+    'n': ' SET NULL',
+    'd': ' SET DEFAULT',
+}
+
+
+def _list_fks_to_public_auth_user(connection) -> list[tuple]:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT
+              n.nspname,
+              c.relname,
+              con.conname,
+              con.condeferrable,
+              con.condeferred,
+              con.convalidated,
+              con.confupdtype,
+              con.confdeltype,
+              ARRAY(
+                SELECT a.attname
+                FROM unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord)
+                JOIN pg_attribute a
+                  ON a.attrelid = con.conrelid AND a.attnum = k.attnum
+                ORDER BY k.ord
+              ),
+              ARRAY(
+                SELECT a.attname
+                FROM unnest(con.confkey) WITH ORDINALITY AS k(attnum, ord)
+                JOIN pg_attribute a
+                  ON a.attrelid = con.confrelid AND a.attnum = k.attnum
+                ORDER BY k.ord
+              )
+            FROM pg_constraint con
+            JOIN pg_class c ON c.oid = con.conrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_class cf ON cf.oid = con.confrelid
+            JOIN pg_namespace nf ON nf.oid = cf.relnamespace
+            WHERE con.contype = 'f'
+              AND nf.nspname = 'public'
+              AND cf.relname = 'auth_user'
+            ORDER BY n.nspname, c.relname, con.conname
+            """
+        )
+        return list(cursor.fetchall())
+
+
+def retarget_public_auth_user_foreign_keys(connection) -> list[str]:
+    """Перенацелить FK public.auth_user на core.auth_user после выноса схемы.
+
+    SET SCHEMA не меняет уже существующий REFERENCES public.auth_user(...).
+    token_blacklist и другие таблицы третьих приложений тогда отвергают
+    пользователя, которого нет в устаревшей копии public.auth_user.
+    """
+    if connection.vendor != 'postgresql':
+        return []
+    if not relation_exists(connection, 'core', 'auth_user'):
+        return []
+    if not relation_exists(connection, 'public', 'auth_user'):
+        return []
+
+    from src.core.utils.database.module_schema import CORE_SCHEMA
+
+    q_core = quote_ident(connection, CORE_SCHEMA)
+    q_user = quote_ident(connection, 'auth_user')
+    retargeted: list[str] = []
+    with connection.cursor() as cursor:
+        for row in _list_fks_to_public_auth_user(connection):
+            (
+                child_schema,
+                child_table,
+                conname,
+                deferrable,
+                deferred,
+                validated,
+                upd_type,
+                del_type,
+                cols,
+                ref_cols,
+            ) = row
+            if not cols or not ref_cols:
+                continue
+            q_schema = quote_ident(connection, child_schema)
+            q_table = quote_ident(connection, child_table)
+            q_con = quote_ident(connection, conname)
+            q_cols = ', '.join(quote_ident(connection, name) for name in cols)
+            q_refs = ', '.join(quote_ident(connection, name) for name in ref_cols)
+            defer_sql = ''
+            if deferrable:
+                defer_sql = (
+                    ' DEFERRABLE INITIALLY DEFERRED'
+                    if deferred
+                    else ' DEFERRABLE INITIALLY IMMEDIATE'
+                )
+            upd_sql = _FK_ACTION_SQL.get(upd_type, '')
+            del_sql = _FK_ACTION_SQL.get(del_type, '')
+            if upd_sql:
+                upd_sql = f' ON UPDATE{upd_sql}'
+            if del_sql:
+                del_sql = f' ON DELETE{del_sql}'
+            valid_sql = '' if validated else ' NOT VALID'
+            cursor.execute(
+                f'ALTER TABLE {q_schema}.{q_table} DROP CONSTRAINT {q_con}'
+            )
+            cursor.execute(
+                f'ALTER TABLE {q_schema}.{q_table} '
+                f'ADD CONSTRAINT {q_con} '
+                f'FOREIGN KEY ({q_cols}) REFERENCES {q_core}.{q_user} ({q_refs})'
+                f'{upd_sql}{del_sql}{defer_sql}{valid_sql}'
+            )
+            retargeted.append(f'{child_schema}.{child_table}.{conname}')
+    return retargeted
+
+
 def revoke_create_on_public(connection) -> None:
     with connection.cursor() as cursor:
         cursor.execute('REVOKE CREATE ON SCHEMA public FROM PUBLIC')

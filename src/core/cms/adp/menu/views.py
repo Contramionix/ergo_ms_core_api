@@ -620,7 +620,10 @@ class MenuRestoreView(BaseMenuAPIView):
     """Восстановление пунктов меню из populate-функций миграций."""
 
     @swagger_auto_schema(
-        operation_description="Восстановить меню из миграций ядра и модулей (restore_menu)",
+        operation_description=(
+            "Восстановить меню: ядро из своих миграций, модули с живых "
+            "процессов (menu.catalog) и с диска ядра, если папка модуля есть"
+        ),
         responses={
             200: "Меню восстановлено",
             401: "Не авторизован",
@@ -650,7 +653,7 @@ class MenuRestoreView(BaseMenuAPIView):
             call_command('restore_menu', stdout=buffer)
             invalidate_user_menu_cache()
             return Response({
-                'message': _('Меню восстановлено из миграций'),
+                'message': _('Меню восстановлено из ядра и модулей'),
                 'details': buffer.getvalue(),
                 'undo_token': undo_token,
             })
