@@ -143,11 +143,53 @@ def iter_module_migration_dirs(module_dir):
             yield (sub.name,), nested
 
 
-def module_menu_migration_import_path(module_name, subpath_parts, stem):
+def module_app_module_path(module_name, subpath_parts):
     base = f'modules.{module_name}.api'
     if subpath_parts:
         base += '.' + '.'.join(subpath_parts)
-    return f'{base}.migrations.{stem}'
+    return base
+
+
+def module_menu_migration_import_path(module_name, subpath_parts, stem):
+    return f'{module_app_module_path(module_name, subpath_parts)}.migrations.{stem}'
+
+
+def is_module_app_installed(module_name, subpath_parts) -> bool:
+    """
+    Приложение модуля поднято в текущем процессе.
+
+    Каталог модуля лежит на диске всегда, но slim-процесс и изолированный прогон
+    тестов поднимают только часть приложений. Меню чужого модуля в таком процессе
+    сеять нечем и незачем.
+    """
+    from django.apps import apps
+    from django.core.exceptions import AppRegistryNotReady
+
+    try:
+        return apps.get_containing_app_config(
+            module_app_module_path(module_name, subpath_parts)
+        ) is not None
+    except AppRegistryNotReady:
+        return True
+
+
+def are_migration_dependencies_installed(dependencies) -> bool:
+    """Все приложения из dependencies миграции есть в реестре текущего процесса."""
+    from django.apps import apps
+    from django.core.exceptions import AppRegistryNotReady
+
+    try:
+        installed_labels = set(apps.app_configs)
+    except AppRegistryNotReady:
+        return True
+
+    for dependency in dependencies or ():
+        app_label = dependency[0] if isinstance(dependency, (tuple, list)) else dependency
+        if not isinstance(app_label, str) or app_label.startswith('__'):
+            continue
+        if app_label not in installed_labels:
+            return False
+    return True
 
 
 def load_module_menu_migration_ops(module_name, subpath_parts, migrations_dir):
@@ -182,6 +224,9 @@ def load_module_menu_migration_ops(module_name, subpath_parts, migrations_dir):
         if not migration_class or not issubclass(migration_class, migrations.Migration):
             continue
 
+        if not are_migration_dependencies_installed(migration_class.dependencies):
+            continue
+
         populate_func = None
         for op in migration_class.operations:
             if isinstance(op, migrations.RunPython):
@@ -213,6 +258,8 @@ def discover_one_module_menu_migrations(module_name: str):
 
     entries = []
     for subpath_parts, migrations_dir in iter_module_migration_dirs(module_dir):
+        if not is_module_app_installed(module_name, subpath_parts):
+            continue
         entries.extend(
             load_module_menu_migration_ops(module_name, subpath_parts, migrations_dir)
         )
@@ -242,6 +289,8 @@ def discover_module_menu_migrations():
 
         entries = []
         for subpath_parts, migrations_dir in iter_module_migration_dirs(module_dir):
+            if not is_module_app_installed(module_name, subpath_parts):
+                continue
             entries.extend(
                 load_module_menu_migration_ops(module_name, subpath_parts, migrations_dir)
             )

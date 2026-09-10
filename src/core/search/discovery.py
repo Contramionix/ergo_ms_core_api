@@ -32,6 +32,17 @@ def _coerce_definition(raw: dict[str, Any]) -> SearchIndexDefinition | None:
   )
 
 
+def _is_app_installed(app_module_path: str) -> bool:
+  """Приложение поднято в этом процессе (slim-процесс и изолированный прогон — не все)."""
+  from django.apps import apps
+  from django.core.exceptions import AppRegistryNotReady
+
+  try:
+    return apps.get_containing_app_config(app_module_path) is not None
+  except AppRegistryNotReady:
+    return True
+
+
 def _module_search_index_paths() -> list[str]:
   from src.config.settings.base import DJANGO_CORE_DIR, MODULES_DIR
   from src.core.utils.module_registry import (
@@ -57,7 +68,10 @@ def _module_search_index_paths() -> list[str]:
           continue
         nested = '.'.join(parts[:-1])
         suffix = f'.{nested}' if nested else ''
-        candidates.append(f'modules.{module_dir.name}.api{suffix}.search_indexes')
+        app_path = f'modules.{module_dir.name}.api{suffix}'
+        if not _is_app_installed(app_path):
+          continue
+        candidates.append(f'{app_path}.search_indexes')
 
   core_root = Path(DJANGO_CORE_DIR)
   if core_root.is_dir():
