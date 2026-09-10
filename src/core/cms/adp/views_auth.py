@@ -39,6 +39,7 @@ from src.core.cms.adp.services.registration import RegistrationService
 from src.core.utils.exception_handler import too_many_requests_message
 from src.core.cms.adp.services.password_reset import PasswordResetService
 from src.core.cms.adp.services.profile_settings import ProfileSettingsService
+from src.core.cms.adp.services.session_bootstrap import build_session_bootstrap_payload
 from src.core.cms.adp.services.session_devices import (
     attach_device_claim,
     attach_device_to_refresh_token,
@@ -499,8 +500,17 @@ class UserAuthorizationView(BaseAPIViewPublicMixin):
                 attach_device_to_refresh_token(refresh, device)
                 attach_device_claim(access_token, device)
 
+                payload = {'access': str(access_token)}
+                try:
+                    payload['session_bootstrap'] = build_session_bootstrap_payload(
+                        user,
+                        session_claims=restore_claims,
+                    )
+                except Exception:
+                    logger.exception('Не удалось вложить session_bootstrap во вход')
+
                 response = Response(
-                    {'access': str(access_token)},
+                    payload,
                     status=status.HTTP_200_OK,
                 )
                 set_refresh_cookie(
