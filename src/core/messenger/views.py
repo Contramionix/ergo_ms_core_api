@@ -11,6 +11,7 @@ from src.core.realtime.topics import messenger_group, messenger_topic
 from src.core.utils.mixins import SwaggerSafeMixin
 from src.core.utils.permissions import ObjectPermissionMixin
 
+from .message_create import broadcast_message_event, save_new_message
 from .models import Message, MessageAttachment
 from .serializers import MessageAttachmentSerializer, MessageSerializer
 from .utils import get_content_type
@@ -87,13 +88,13 @@ class MessageViewSet(ObjectPermissionMixin, SwaggerSafeMixin, viewsets.ModelView
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
     def perform_create(self, serializer):
-        message = serializer.save(author=self.request.user)
-        self._broadcast(message, 'new_message')
+        message = save_new_message(serializer, author=self.request.user)
+        broadcast_message_event(message, 'new_message', request=self.request)
 
     def perform_update(self, serializer):
         self._check_author(serializer.instance)
         message = serializer.save(is_edited=True)
-        self._broadcast(message, 'message_edited')
+        broadcast_message_event(message, 'message_edited', request=self.request)
 
     def _get_ct_name_for_group(self, content_type):
         """Имя content_type для группы WebSocket (app_label.model)."""
@@ -108,22 +109,6 @@ class MessageViewSet(ObjectPermissionMixin, SwaggerSafeMixin, viewsets.ModelView
         object_id = instance.object_id
         instance.delete()
         self._broadcast_deleted(ct_name, object_id, message_id)
-
-    def _broadcast(self, message, event_type):
-        ct_name = self._get_ct_name_for_group(message.content_type)
-        serialized = MessageSerializer(message, context={'request': self.request}).data
-        group = messenger_group(ct_name, message.object_id)
-        topic = messenger_topic(ct_name, message.object_id)
-        payload = serialized if event_type != 'message_deleted' else message.id
-        try:
-            RealtimeHub.publish(
-                group=group,
-                topic=topic,
-                event_type=event_type,
-                payload=payload,
-            )
-        except Exception:
-            logger.exception('Broadcast %s failed', event_type)
 
     def _broadcast_deleted(self, ct_name, object_id, message_id):
         group = messenger_group(ct_name, object_id)
