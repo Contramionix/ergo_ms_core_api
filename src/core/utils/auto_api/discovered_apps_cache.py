@@ -47,37 +47,47 @@ def _should_skip_walk_dir(name: str) -> bool:
     return name in SKIP_WALK_DIR_NAMES or name.startswith('.')
 
 
-def max_mtime_named_narrow(root: Path, filename: str) -> float:
-    """Max mtime файла filename под root, без тяжёлых каталогов."""
+def named_file_stats(root: Path, filename: str) -> tuple[int, float]:
+    """Число файлов filename и их max mtime под root, без тяжёлых каталогов."""
+    count = 0
     max_mtime = 0.0
     root_s = os.fspath(root)
     if not os.path.isdir(root_s):
-        return 0.0
+        return 0, 0.0
     try:
         for dirpath, dirnames, filenames in os.walk(root_s, topdown=True, followlinks=False):
             dirnames[:] = [name for name in dirnames if not _should_skip_walk_dir(name)]
             if filename not in filenames:
                 continue
+            count += 1
             try:
                 max_mtime = max(max_mtime, os.path.getmtime(os.path.join(dirpath, filename)))
             except OSError:
                 pass
     except OSError:
         pass
-    return max_mtime
+    return count, max_mtime
 
 
-def modules_named_mtime(modules_dir: Path, filename: str, *, under_api: bool) -> float:
+def max_mtime_named_narrow(root: Path, filename: str) -> float:
+    """Max mtime файла filename под root, без тяжёлых каталогов."""
+    return named_file_stats(root, filename)[1]
+
+
+def modules_named_stats(
+    modules_dir: Path, filename: str, *, under_api: bool
+) -> tuple[int, float]:
     """
-    mtime по modules/<name>/… без обхода client/ и submodule .git.
+    Число файлов и max mtime по modules/<name>/… без обхода client/ и submodule .git.
 
     under_api=True — только modules/<name>/api/**/filename
     under_api=False — modules/<name>/filename (integrations.yaml).
     """
+    count = 0
     max_mtime = 0.0
     root_s = os.fspath(modules_dir)
     if not os.path.isdir(root_s):
-        return 0.0
+        return 0, 0.0
     try:
         with os.scandir(root_s) as entries:
             for entry in entries:
@@ -88,23 +98,41 @@ def modules_named_mtime(modules_dir: Path, filename: str, *, under_api: bool) ->
                 if under_api:
                     api_path = os.path.join(entry.path, 'api')
                     if os.path.isdir(api_path):
-                        max_mtime = max(max_mtime, max_mtime_named_narrow(Path(api_path), filename))
+                        nested_count, nested_mtime = named_file_stats(
+                            Path(api_path), filename
+                        )
+                        count += nested_count
+                        max_mtime = max(max_mtime, nested_mtime)
                 else:
                     candidate = os.path.join(entry.path, filename)
                     if os.path.isfile(candidate):
+                        count += 1
                         try:
-                            max_mtime = max(max_mtime, os.path.getmtime(candidate))
+                            max_mtime = max(
+                                max_mtime, os.path.getmtime(candidate)
+                            )
                         except OSError:
                             pass
     except OSError:
         pass
-    return max_mtime
+    return count, max_mtime
+
+
+def modules_named_mtime(modules_dir: Path, filename: str, *, under_api: bool) -> float:
+    """
+    mtime по modules/<name>/… без обхода client/ и submodule .git.
+
+    under_api=True — только modules/<name>/api/**/filename
+    under_api=False — modules/<name>/filename (integrations.yaml).
+    """
+    return modules_named_stats(modules_dir, filename, under_api=under_api)[1]
 
 
 def get_discovery_dirs_fingerprint() -> dict:
     """
     Fingerprint для кэша discovered_apps / discovered_urls.
-    Учитывает mtime директорий, apps.py и integrations.yaml.
+    Учитывает mtime директорий, число и mtime apps.py и integrations.yaml.
+    Число файлов — строка: fingerprint_equal сравнивает числа как mtime с допуском 2 с.
     Также включает DISABLED_MODULES, MICROSERVICE_MODULES и BRIDGE_SERVICE_URLS —
     при изменении списка или карты соседей кэш инвалидируется.
     """
@@ -114,30 +142,41 @@ def get_discovery_dirs_fingerprint() -> dict:
     if core_path.exists():
         try:
             dir_mtime = core_path.stat().st_mtime
-            apps_mtime = max_mtime_named_narrow(core_path, 'apps.py')
+            apps_count, apps_mtime = named_file_stats(core_path, 'apps.py')
             result['core_dir'] = dir_mtime
             result['core_apps'] = max(dir_mtime, apps_mtime)
+            result['core_apps_count'] = str(apps_count)
         except OSError:
             result['core_dir'] = 0
             result['core_apps'] = 0
+            result['core_apps_count'] = '0'
     else:
         result['core_dir'] = 0
         result['core_apps'] = 0
+        result['core_apps_count'] = '0'
     if modules_path.exists():
         try:
             dir_mtime = modules_path.stat().st_mtime
-            apps_mtime = modules_named_mtime(modules_path, 'apps.py', under_api=True)
-            integrations_mtime = modules_named_mtime(
+            apps_count, apps_mtime = modules_named_stats(
+                modules_path, 'apps.py', under_api=True
+            )
+            integrations_count, integrations_mtime = modules_named_stats(
                 modules_path, 'integrations.yaml', under_api=False
             )
             result['modules_dir'] = dir_mtime
             result['modules_apps'] = max(dir_mtime, apps_mtime, integrations_mtime)
+            result['modules_apps_count'] = str(apps_count)
+            result['modules_integrations_count'] = str(integrations_count)
         except OSError:
             result['modules_dir'] = 0
             result['modules_apps'] = 0
+            result['modules_apps_count'] = '0'
+            result['modules_integrations_count'] = '0'
     else:
         result['modules_dir'] = 0
         result['modules_apps'] = 0
+        result['modules_apps_count'] = '0'
+        result['modules_integrations_count'] = '0'
     result['disabled_modules'] = os.getenv('DISABLED_MODULES', '')
     result['microservice_modules'] = os.getenv('MICROSERVICE_MODULES', '')
     result['bridge_service_urls'] = os.getenv('BRIDGE_SERVICE_URLS', '')
@@ -149,8 +188,8 @@ def get_discovery_dirs_fingerprint() -> dict:
         result['process_filter'] = ''
     # Инвалидация кэша при смене алгоритма порядка (integrations.yaml)
     result['module_load_order'] = 3
-    # Узкий обход вместо Path.rglob
-    result['fingerprint_algo'] = 3
+    # Узкий обход вместо Path.rglob; строка, иначе допуск mtime проглотит +1
+    result['fingerprint_algo'] = '4'
     return result
 
 

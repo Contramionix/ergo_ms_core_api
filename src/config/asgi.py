@@ -43,9 +43,7 @@ else:
     from channels.routing import ProtocolTypeRouter, URLRouter
     from channels.security.websocket import AllowedHostsOriginValidator
 
-    from src.core.cms.adp.routing import websocket_urlpatterns as adp_ws
-    from src.core.messenger.routing import websocket_urlpatterns as messenger_ws
-    from src.core.notifications.routing import websocket_urlpatterns as notifications_ws
+    from src.core.realtime.asgi_routing import discover_websocket_urlpatterns
     from src.core.realtime.transport import is_websocket_transport
 
     _protocol_apps = {
@@ -54,7 +52,7 @@ else:
     if is_websocket_transport():
         _protocol_apps["websocket"] = AllowedHostsOriginValidator(
             AuthMiddlewareStack(
-                URLRouter(messenger_ws + notifications_ws + adp_ws)
+                URLRouter(discover_websocket_urlpatterns())
             )
         )
 

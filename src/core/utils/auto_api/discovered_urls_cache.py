@@ -13,8 +13,8 @@ from src.config.settings.base import BASE_DIR, DJANGO_CORE_DIR, MODULES_DIR
 from src.core.utils.auto_api.discovered_apps_cache import (
     _should_skip_walk_dir,
     get_discovery_dirs_fingerprint,
-    max_mtime_named_narrow,
-    modules_named_mtime,
+    modules_named_stats,
+    named_file_stats,
 )
 
 logger = logging.getLogger('utils')
@@ -51,11 +51,15 @@ def invalidate_discovered_urls_cache() -> None:
 
 def _url_fingerprint() -> dict:
     fingerprint = get_discovery_dirs_fingerprint()
-    fingerprint['core_urls'] = max_mtime_named_narrow(DJANGO_CORE_DIR, 'urls.py')
-    fingerprint['modules_urls'] = modules_named_mtime(
+    core_urls_count, core_urls_mtime = named_file_stats(DJANGO_CORE_DIR, 'urls.py')
+    modules_urls_count, modules_urls_mtime = modules_named_stats(
         MODULES_DIR, 'urls.py', under_api=True
     )
-    fingerprint['urls_algo'] = 2
+    fingerprint['core_urls'] = core_urls_mtime
+    fingerprint['modules_urls'] = modules_urls_mtime
+    fingerprint['core_urls_count'] = str(core_urls_count)
+    fingerprint['modules_urls_count'] = str(modules_urls_count)
+    fingerprint['urls_algo'] = '3'
     try:
         from src.core.utils.module_registry import get_process_filter_fingerprint
 
