@@ -1,8 +1,8 @@
 """Регистрация topic ядра в realtime registry."""
 
 from src.core.cms.adp.services.permissions import PermissionService
-from src.core.messenger.access import has_messenger_access, resolve_messenger_object_pk
 from src.core.realtime.registry import register_realtime_topic
+from src.core.realtime.room_access import has_messenger_access, resolve_room_object_pk
 from src.core.realtime.topics import (
     PRESENCE_ADMIN_GROUP,
     PRESENCE_ADMIN_TOPIC,
@@ -44,7 +44,7 @@ def _resolve_messenger_topic(_user, params: dict[str, str]) -> str | None:
     object_id = params.get('object_id', '')
     if not content_type or object_id in (None, ''):
         return None
-    object_pk = resolve_messenger_object_pk(content_type, object_id)
+    object_pk = resolve_room_object_pk(content_type, object_id)
     if object_pk is None:
         return None
     return messenger_group(content_type, object_pk)

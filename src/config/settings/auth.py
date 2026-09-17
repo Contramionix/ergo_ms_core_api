@@ -132,6 +132,11 @@ if not JWT_LIFETIME_ENABLED and not IS_DEVELOPMENT:
 # Внутреннее значение при JWT_LIFETIME_ENABLED=false (JWT требует claim exp)
 JWT_NO_EXPIRY_LIFETIME_MINUTES = 5256000
 
+# Допуск часов между процессами, которые выпускают и проверяют JWT.
+# Без него свежий access с iat «в будущем» даёт 401 Given token not valid.
+_raw_jwt_leeway = env.int('API_JWT_LEEWAY_SECONDS', default=60)
+JWT_LEEWAY_SECONDS = max(0, min(_raw_jwt_leeway, 300))
+
 # Конфигурация JWT-аутентификации.
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(
@@ -145,6 +150,7 @@ SIMPLE_JWT = {
     'ALGORITHM': 'HS256',
     'SIGNING_KEY': env.str('API_JWT_SIGNING_KEY', default='') or env.str('API_SECRET_KEY'),
     'VERIFYING_KEY': None,
+    'LEEWAY': JWT_LEEWAY_SECONDS,
     'AUTH_HEADER_TYPES': ('Bearer',),
     'USER_ID_FIELD': 'id',
     'USER_ID_CLAIM': 'user_id',
