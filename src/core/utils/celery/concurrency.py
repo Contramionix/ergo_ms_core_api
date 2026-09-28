@@ -12,6 +12,9 @@ from django.core.cache import cache
 
 logger = logging.getLogger('celery.concurrency')
 
+# None в Celery.retry значит «взять max_retries задачи», не «ждать бесконечно».
+_SLOT_WAIT_RETRIES = 10**9
+
 
 class _SlotGate:
     """Счётчик слотов: смену лимита можно делать без сброса уже взятых."""
@@ -453,9 +456,8 @@ def create_concurrency_limited_task_class(base_task_class):
                         f"Очередь {queue_name}: лимит ({limit}) превышен. "
                         f"Задача {self.request.id} отложена на {retry_delay}с."
                     )
-                    # Вызываем retry с max_retries=None чтобы НЕ учитывать в общем лимите retry задачи
-                    # Это специальный retry для ограничения параллелизма, не для ошибок
-                    raise self.retry(countdown=retry_delay, max_retries=None)
+                    # Ожидание слота не тратит max_retries задачи: иначе Beat умирает после двух попыток.
+                    raise self.retry(countdown=retry_delay, max_retries=_SLOT_WAIT_RETRIES)
                 
                 # Слот захвачен - запоминаем для освобождения
                 task_id = self.request.id
@@ -535,7 +537,7 @@ def with_queue_limit(queue_name: Optional[str] = None):
                     f"Очередь {effective_queue}: лимит ({limit}) превышен. "
                     f"Задача {self.request.id} будет повторена через {retry_delay}с."
                 )
-                raise self.retry(countdown=retry_delay)
+                raise self.retry(countdown=retry_delay, max_retries=_SLOT_WAIT_RETRIES)
             
             try:
                 return func(self, *args, **kwargs)
