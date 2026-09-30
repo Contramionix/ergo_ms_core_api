@@ -145,17 +145,20 @@ if IS_CELERY_PROCESS:
             "task_queues": task_queues,
             "task_annotations": manager.get_all_task_annotations(),
             "task_acks_late": True,
-            # Redis снова отдаёт неподтверждённую задачу через час. Самый долгий
-            # обход парсера живёт до трёх суток, поэтому час порождает второй прогон.
-            "broker_transport_options": {
-                "visibility_timeout": 345600,
-            },
             "worker_log_format": CELERY_WORKER_LOG_FORMAT,
             "worker_task_log_format": CELERY_WORKER_TASK_LOG_FORMAT,
             "worker_log_color": False,
             "worker_redirect_stdouts": False,
             "worker_redirect_stdouts_level": "INFO",
         }
+        # visibility_timeout понимают Redis и SQS. Транспорт sqla+* отдаёт
+        # broker_transport_options в create_engine(), и лишний аргумент роняет воркер.
+        # У Redis час — значение по умолчанию; самый долгий обход парсера живёт до трёх суток.
+        broker_url = str(celery_app.conf.broker_url or "")
+        if broker_url.startswith("redis://") or broker_url.startswith("rediss://"):
+            config["broker_transport_options"] = {
+                "visibility_timeout": 345600,
+            }
         config.update(manager.get_additional_configs())
         return config
 
