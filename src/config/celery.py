@@ -145,6 +145,11 @@ if IS_CELERY_PROCESS:
             "task_queues": task_queues,
             "task_annotations": manager.get_all_task_annotations(),
             "task_acks_late": True,
+            # Redis снова отдаёт неподтверждённую задачу через час. Самый долгий
+            # обход парсера живёт до трёх суток, поэтому час порождает второй прогон.
+            "broker_transport_options": {
+                "visibility_timeout": 345600,
+            },
             "worker_log_format": CELERY_WORKER_LOG_FORMAT,
             "worker_task_log_format": CELERY_WORKER_TASK_LOG_FORMAT,
             "worker_log_color": False,
